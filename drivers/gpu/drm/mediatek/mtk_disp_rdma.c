@@ -181,6 +181,11 @@ void mtk_rdma_stop(struct device *dev)
 	rdma_update_bits(dev, DISP_REG_RDMA_GLOBAL_CON, RDMA_ENGINE_EN, 0);
 }
 
+/* diagnostic: raw FIFO_CON value instead of the computed one (0: computed) */
+static unsigned int fifo_con;
+module_param_named(rdma_fifo_con, fifo_con, uint, 0644);
+MODULE_PARM_DESC(rdma_fifo_con, "Raw RDMA FIFO_CON value, 0 = computed (MT6785 bootloader: 0x86000000)");
+
 void mtk_rdma_config(struct device *dev, unsigned int width,
 		     unsigned int height, unsigned int vrefresh,
 		     unsigned int bpc, struct cmdq_pkt *cmdq_pkt)
@@ -210,6 +215,8 @@ void mtk_rdma_config(struct device *dev, unsigned int width,
 	reg = RDMA_FIFO_UNDERFLOW_EN |
 	      RDMA_FIFO_PSEUDO_SIZE(rdma_fifo_size) |
 	      RDMA_OUTPUT_VALID_FIFO_THRESHOLD(threshold);
+	if (fifo_con)
+		reg = fifo_con;
 	mtk_ddp_write(cmdq_pkt, reg, &rdma->cmdq_reg, rdma->regs, DISP_REG_RDMA_FIFO_CON);
 }
 

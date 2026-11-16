@@ -4,10 +4,17 @@
  */
 
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <linux/kernel_stat.h>
 #include <linux/mailbox_controller.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/pm_runtime.h>
+#include <linux/seq_file.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
 #include <linux/soc/mediatek/mtk-mmsys.h>
 #include <linux/soc/mediatek/mtk-mutex.h>
@@ -22,6 +29,7 @@
 
 #include "mtk_crtc.h"
 #include "mtk_ddp_comp.h"
+#include "mtk_disp_drv.h"
 #include "mtk_drm_drv.h"
 #include "mtk_plane.h"
 
@@ -38,6 +46,16 @@
  *
  * TODO: Needs update: this header is missing a bunch of member descriptions.
  */
+#define MTK_VBL_SRC_TIMER	(-1)
+
+/* register block the lisbon debugfs may read or write (component, mmsys, mutex) */
+struct mtk_crtc_dbg_blk {
+	const char		*name;
+	phys_addr_t		base;
+	resource_size_t		size;
+	void __iomem		*regs;
+};
+
 struct mtk_crtc {
 	struct drm_crtc			base;
 	bool				enabled;
@@ -70,6 +88,27 @@ struct mtk_crtc {
 	bool				config_updating;
 	/* lock for config_updating to cmd buffer */
 	spinlock_t			config_lock;
+
+	/*
+	 * vblank source (index into ddp_comp or MTK_VBL_SRC_TIMER), changed
+	 * under dev->vbl_lock only; diagnostics counters and the fallback to
+	 * the timer when the selected source stays silent.
+	 */
+	int				vbl_src;
+	bool				vbl_on;
+	atomic_t			vbl_hits;
+	atomic_t			vbl_timer_hits;
+	int				vbl_hits_enable;
+	struct delayed_work		vbl_watch;
+
+	/* lisbon diagnostics (debugfs): hw_ready = clocks on, path set up */
+	struct mutex			dbg_lock;
+	bool				dbg_hw_ready;
+	unsigned int			dbg_nblk;
+	struct mtk_crtc_dbg_blk		*dbg_blk;
+	u32				dbg_rd_addr;
+	u32				dbg_rd_val;
+	int				dbg_rd_ret;
 
 	struct mtk_ddp_comp		*ddp_comp[];
 };
@@ -338,6 +377,18 @@ ddp_cmdq_cb_out:
 }
 #endif
 
+/*
+ * Takeover of a path a bootloader left scanning out (video mode, no CMDQ):
+ * mutex, routing and engines are re-programmed by the CPU. Done in the middle
+ * of a frame, the running frame breaks (OVL underflow, RDMA abnormal EOF,
+ * DSI input unfinished) and the path may not start again. With takeover_sync
+ * the re-programming waits for the vertical blanking of the output first.
+ */
+static bool takeover_sync = true;
+module_param(takeover_sync, bool, 0644);
+MODULE_PARM_DESC(takeover_sync,
+		 "Re-program a path taken over from the bootloader in the vertical blanking");
+
 static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_crtc *crtc = &mtk_crtc->base;
@@ -346,6 +397,7 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	struct drm_connector_list_iter conn_iter;
 	struct drm_device *dev = mtk_crtc->base.dev;
 	unsigned int width, height, vrefresh, bpc = MTK_MAX_BPC;
+	ktime_t sync_start = 0;
 	int ret;
 	int i;
 
@@ -389,6 +441,10 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		goto err_mutex_unprepare;
 	}
 
+	if (takeover_sync &&
+	    !mtk_ddp_comp_wait_blanking(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]))
+		sync_start = ktime_get();
+
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					  mtk_crtc->ddp_comp[i + 1]->id))
@@ -412,6 +468,10 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);
 	}
+
+	if (sync_start)
+		drm_info(dev, "takeover: path re-programmed %lld us after the start of the blanking\n",
+			 ktime_us_delta(ktime_get(), sync_start));
 
 	/* Initially configure all planes */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
@@ -649,6 +709,8 @@ static void mtk_crtc_ddp_irq(void *data)
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
 
+	atomic_inc(&mtk_crtc->vbl_hits);
+
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct drm_device *dev = mtk_crtc->base.dev;
 	if (!priv->data->shadow_register && !mtk_crtc->cmdq_client.chan)
@@ -663,12 +725,97 @@ static void mtk_crtc_ddp_irq(void *data)
 	mtk_drm_finish_page_flip(mtk_crtc);
 }
 
+/*
+ * vblank source. Upstream: the first component (OVL0 frame done). For a
+ * path taken over from a bootloader the frame interrupt may never come;
+ * vblank_src selects another component (index in the path, e.g. RDMA or the
+ * DSI front porch) or a timer (-1), vblank_fallback_ms switches to the timer
+ * when the selected source stays silent after an enable, so that commits and
+ * DPMS do not hang in their 10 s timeouts.
+ */
+static int vblank_src;
+module_param(vblank_src, int, 0644);
+MODULE_PARM_DESC(vblank_src, "vblank source: index of the path component (0 = first), -1 = timer");
+
+static unsigned int vblank_fallback_ms = 1000;
+module_param(vblank_fallback_ms, uint, 0644);
+MODULE_PARM_DESC(vblank_fallback_ms, "Switch to the vblank timer if the source stays silent this long after enable, 0 = never");
+
+static bool mtk_crtc_handle_vblank_timeout(struct drm_crtc *crtc)
+{
+	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+
+	atomic_inc(&mtk_crtc->vbl_timer_hits);
+	mtk_crtc_ddp_irq(crtc);
+	return true;
+}
+
+static void mtk_crtc_vbl_src_on(struct mtk_crtc *mtk_crtc, int src)
+{
+	if (src == MTK_VBL_SRC_TIMER)
+		drm_crtc_vblank_start_timer(&mtk_crtc->base);
+	else
+		mtk_ddp_comp_enable_vblank(mtk_crtc->ddp_comp[src]);
+}
+
+static void mtk_crtc_vbl_src_off(struct mtk_crtc *mtk_crtc, int src)
+{
+	if (src == MTK_VBL_SRC_TIMER)
+		drm_crtc_vblank_cancel_timer(&mtk_crtc->base);
+	else
+		mtk_ddp_comp_disable_vblank(mtk_crtc->ddp_comp[src]);
+}
+
+static const char *mtk_crtc_vbl_src_name(struct mtk_crtc *mtk_crtc, int src)
+{
+	if (src == MTK_VBL_SRC_TIMER)
+		return "timer";
+	return dev_name(mtk_crtc->ddp_comp[src]->dev);
+}
+
+/* needs the path powered (hw_ready or within enable/disable) */
+static void mtk_crtc_vbl_switch(struct mtk_crtc *mtk_crtc, int src)
+{
+	struct drm_device *dev = mtk_crtc->base.dev;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->vbl_lock, flags);
+	if (src != mtk_crtc->vbl_src) {
+		if (mtk_crtc->vbl_on) {
+			mtk_crtc_vbl_src_off(mtk_crtc, mtk_crtc->vbl_src);
+			mtk_crtc_vbl_src_on(mtk_crtc, src);
+		}
+		mtk_crtc->vbl_src = src;
+	}
+	spin_unlock_irqrestore(&dev->vbl_lock, flags);
+}
+
+static void mtk_crtc_vbl_watch(struct work_struct *work)
+{
+	struct mtk_crtc *mtk_crtc = container_of(to_delayed_work(work),
+						 struct mtk_crtc, vbl_watch);
+	int src;
+
+	mutex_lock(&mtk_crtc->dbg_lock);
+	src = mtk_crtc->vbl_src;
+	if (mtk_crtc->dbg_hw_ready && src != MTK_VBL_SRC_TIMER &&
+	    READ_ONCE(mtk_crtc->vbl_on) &&
+	    atomic_read(&mtk_crtc->vbl_hits) == mtk_crtc->vbl_hits_enable) {
+		drm_warn(mtk_crtc->base.dev,
+			 "vblank: no interrupt from %s within %u ms after enable, using the timer\n",
+			 mtk_crtc_vbl_src_name(mtk_crtc, src), vblank_fallback_ms);
+		mtk_crtc_vbl_switch(mtk_crtc, MTK_VBL_SRC_TIMER);
+	}
+	mutex_unlock(&mtk_crtc->dbg_lock);
+}
+
 static int mtk_crtc_enable_vblank(struct drm_crtc *crtc)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
-	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 
-	mtk_ddp_comp_enable_vblank(comp);
+	/* called with dev->vbl_lock held */
+	mtk_crtc->vbl_on = true;
+	mtk_crtc_vbl_src_on(mtk_crtc, mtk_crtc->vbl_src);
 
 	return 0;
 }
@@ -676,9 +823,10 @@ static int mtk_crtc_enable_vblank(struct drm_crtc *crtc)
 static void mtk_crtc_disable_vblank(struct drm_crtc *crtc)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
-	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 
-	mtk_ddp_comp_disable_vblank(comp);
+	/* called with dev->vbl_lock held */
+	mtk_crtc_vbl_src_off(mtk_crtc, mtk_crtc->vbl_src);
+	mtk_crtc->vbl_on = false;
 }
 
 static void mtk_crtc_update_output(struct drm_crtc *crtc,
@@ -780,7 +928,8 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 	struct drm_device *dev = mtk_crtc->base.dev;
-	int ret;
+	unsigned int fallback_ms;
+	int ret, src;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
 
@@ -798,8 +947,23 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 		return;
 	}
 
+	/* vblank is off here: no vbl_lock needed to pick the source */
+	src = READ_ONCE(vblank_src);
+	if (src < MTK_VBL_SRC_TIMER || src >= (int)mtk_crtc->ddp_comp_nr)
+		src = 0;
+	mtk_crtc->vbl_src = src;
+	mtk_crtc->vbl_hits_enable = atomic_read(&mtk_crtc->vbl_hits);
+
 	drm_crtc_vblank_on(crtc);
 	mtk_crtc->enabled = true;
+
+	mutex_lock(&mtk_crtc->dbg_lock);
+	mtk_crtc->dbg_hw_ready = true;
+	mutex_unlock(&mtk_crtc->dbg_lock);
+
+	fallback_ms = READ_ONCE(vblank_fallback_ms);
+	if (fallback_ms && src != MTK_VBL_SRC_TIMER)
+		schedule_delayed_work(&mtk_crtc->vbl_watch, msecs_to_jiffies(fallback_ms));
 }
 
 static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
@@ -813,6 +977,12 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
 	if (!mtk_crtc->enabled)
 		return;
+
+	/* no diagnostics on the path from here on (clocks go off below) */
+	cancel_delayed_work_sync(&mtk_crtc->vbl_watch);
+	mutex_lock(&mtk_crtc->dbg_lock);
+	mtk_crtc->dbg_hw_ready = false;
+	mutex_unlock(&mtk_crtc->dbg_lock);
 
 	/* Set all pending plane state to disabled */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
@@ -837,6 +1007,9 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	drm_crtc_wait_one_vblank(crtc);
 
 	drm_crtc_vblank_off(crtc);
+	/* a timer callback may still run on another CPU: wait for it */
+	if (drm_crtc_vblank_crtc(crtc)->vblank_timer.crtc)
+		hrtimer_cancel(&drm_crtc_vblank_crtc(crtc)->vblank_timer.timer);
 	mtk_crtc_ddp_hw_fini(mtk_crtc);
 	mtk_ddp_comp_power_off(comp);
 
@@ -882,6 +1055,284 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 	mtk_crtc_update_config(mtk_crtc, !!mtk_crtc->event);
 }
 
+#ifdef CONFIG_DEBUG_FS
+/*
+ * lisbon diagnostics: <debugfs>/dri/N/crtc-0/lisbon_status (read) and
+ * lisbon_action (write one command). Hardware is only touched while the path
+ * is set up (dbg_hw_ready); register writes additionally need reg_writes=1.
+ * No modeset lock is taken, so the actions also work while a commit waits
+ * for a vblank that never comes.
+ */
+static bool reg_writes;
+module_param(reg_writes, bool, 0644);
+MODULE_PARM_DESC(reg_writes, "Allow register writes through the lisbon debugfs (diagnostics)");
+
+static void mtk_crtc_dbg_add_blk(struct mtk_crtc *mtk_crtc, struct device_node *np,
+				 const char *name)
+{
+	struct mtk_crtc_dbg_blk *b;
+	struct resource res;
+
+	if (!np || of_address_to_resource(np, 0, &res))
+		return;
+	b = &mtk_crtc->dbg_blk[mtk_crtc->dbg_nblk];
+	b->regs = of_iomap(np, 0);
+	if (!b->regs)
+		return;
+	b->name = name;
+	b->base = res.start;
+	b->size = resource_size(&res);
+	mtk_crtc->dbg_nblk++;
+}
+
+static void __iomem *mtk_crtc_dbg_reg(struct mtk_crtc *mtk_crtc, u32 addr)
+{
+	unsigned int i;
+
+	if (addr & 3)
+		return NULL;
+	for (i = 0; i < mtk_crtc->dbg_nblk; i++) {
+		struct mtk_crtc_dbg_blk *b = &mtk_crtc->dbg_blk[i];
+
+		if (addr >= b->base && addr - b->base < b->size)
+			return b->regs + (addr - b->base);
+	}
+	return NULL;
+}
+
+static void mtk_crtc_dbg_irq(struct seq_file *m, const char *name, struct device_node *np)
+{
+	bool pending = false, active = false, masked = false;
+	struct irq_data *d;
+	int irq, rp, ra, rm;
+
+	irq = np ? of_irq_get(np, 0) : -ENOENT;
+	if (irq <= 0) {
+		seq_printf(m, "  irq %-16s none\n", name);
+		return;
+	}
+	d = irq_get_irq_data(irq);
+	rp = irq_get_irqchip_state(irq, IRQCHIP_STATE_PENDING, &pending);
+	ra = irq_get_irqchip_state(irq, IRQCHIP_STATE_ACTIVE, &active);
+	rm = irq_get_irqchip_state(irq, IRQCHIP_STATE_MASKED, &masked);
+	seq_printf(m, "  irq %-16s virq %d hwirq %lu count %u type 0x%x disabled %d masked %d chip: pending %c active %c masked %c\n",
+		   name, irq, d ? irqd_to_hwirq(d) : 0, kstat_irqs_usr(irq),
+		   d ? irqd_get_trigger_type(d) : 0,
+		   d ? irqd_irq_disabled(d) : -1, d ? irqd_irq_masked(d) : -1,
+		   rp ? '?' : '0' + pending, ra ? '?' : '0' + active,
+		   rm ? '?' : '0' + masked);
+}
+
+static int mtk_crtc_dbg_status_show(struct seq_file *m, void *unused)
+{
+	struct mtk_crtc *mtk_crtc = m->private;
+	struct drm_crtc *crtc = &mtk_crtc->base;
+	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
+	unsigned int i;
+
+	mutex_lock(&mtk_crtc->dbg_lock);
+	seq_printf(m, "enabled %d hw_ready %d vbl_src %d (%s) vbl_on %d hits %d (at enable %d) timer_hits %d\n",
+		   mtk_crtc->enabled, mtk_crtc->dbg_hw_ready, mtk_crtc->vbl_src,
+		   mtk_crtc_vbl_src_name(mtk_crtc, mtk_crtc->vbl_src),
+		   READ_ONCE(mtk_crtc->vbl_on), atomic_read(&mtk_crtc->vbl_hits),
+		   mtk_crtc->vbl_hits_enable, atomic_read(&mtk_crtc->vbl_timer_hits));
+	seq_printf(m, "drm vblank: count %llu refcount %d enabled %d\n",
+		   drm_crtc_vblank_count(crtc), atomic_read(&vblank->refcount),
+		   READ_ONCE(vblank->enabled));
+	seq_printf(m, "pending: planes %d async %d needs_vblank %d event %d config_updating %d\n",
+		   mtk_crtc->pending_planes, mtk_crtc->pending_async_planes,
+		   mtk_crtc->pending_needs_vblank, !!mtk_crtc->event,
+		   mtk_crtc->config_updating);
+	seq_printf(m, "params: vblank_src %d vblank_fallback_ms %u reg_writes %d\n",
+		   READ_ONCE(vblank_src), READ_ONCE(vblank_fallback_ms), READ_ONCE(reg_writes));
+	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
+		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
+
+		seq_printf(m, "comp %u %s\n", i, comp->dev ? dev_name(comp->dev) : "-");
+		if (comp->dev)
+			mtk_crtc_dbg_irq(m, dev_name(comp->dev), comp->dev->of_node);
+	}
+	for (i = 0; i < mtk_crtc->layer_nr; i++) {
+		struct drm_plane *plane = &mtk_crtc->planes[i];
+		struct mtk_plane_state *ps;
+
+		if (!plane->state)
+			continue;
+		ps = to_mtk_plane_state(plane->state);
+		seq_printf(m, "plane %u: fb %d enable %d config %d dirty %d addr %pad pitch %u fmt %p4cc %ux%u+%u+%u\n",
+			   i, !!plane->state->fb, ps->pending.enable, ps->pending.config,
+			   ps->pending.dirty, &ps->pending.addr, ps->pending.pitch,
+			   &ps->pending.format, ps->pending.width, ps->pending.height,
+			   ps->pending.x, ps->pending.y);
+	}
+	for (i = 0; i < mtk_crtc->dbg_nblk; i++)
+		seq_printf(m, "block %s %pa size 0x%llx\n", mtk_crtc->dbg_blk[i].name,
+			   &mtk_crtc->dbg_blk[i].base, (u64)mtk_crtc->dbg_blk[i].size);
+	if (mtk_crtc->dbg_rd_addr)
+		seq_printf(m, "last rd 0x%08x = 0x%08x (%d)\n", mtk_crtc->dbg_rd_addr,
+			   mtk_crtc->dbg_rd_val, mtk_crtc->dbg_rd_ret);
+	mutex_unlock(&mtk_crtc->dbg_lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(mtk_crtc_dbg_status);
+
+static int mtk_crtc_dbg_parse_src(struct mtk_crtc *mtk_crtc, const char *arg, int *src)
+{
+	unsigned int i;
+
+	if (!strcmp(arg, "timer")) {
+		*src = MTK_VBL_SRC_TIMER;
+		return 0;
+	}
+	if (!strcmp(arg, "dsi")) {
+		*src = mtk_crtc->ddp_comp_nr - 1;
+		return 0;
+	}
+	if (!strcmp(arg, "rdma")) {
+		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+			if (mtk_crtc->ddp_comp[i]->dev &&
+			    strstr(dev_name(mtk_crtc->ddp_comp[i]->dev), ".rdma")) {
+				*src = i;
+				return 0;
+			}
+		return -ENOENT;
+	}
+	if (kstrtoint(arg, 0, src) || *src < 0 || *src >= (int)mtk_crtc->ddp_comp_nr)
+		return -EINVAL;
+	return 0;
+}
+
+static int mtk_crtc_dbg_action(struct mtk_crtc *mtk_crtc, char *cmd)
+{
+	struct drm_crtc *crtc = &mtk_crtc->base;
+	char *arg1, *arg2, *p = strim(cmd);
+	unsigned long flags;
+	void __iomem *reg;
+	unsigned int i;
+	u32 addr = 0, val = 0;
+	int ret = 0, src;
+
+	arg1 = strsep(&p, " ");
+	arg2 = p ? strsep(&p, " ") : NULL;
+
+	if (!mtk_crtc->dbg_hw_ready)
+		return -EAGAIN;
+
+	if (!strcmp(arg1, "apply")) {
+		/* one software vblank: pending plane config + events */
+		local_irq_save(flags);
+		mtk_crtc_ddp_irq(crtc);
+		local_irq_restore(flags);
+	} else if (!strcmp(arg1, "config")) {
+		local_irq_save(flags);
+		mtk_crtc_ddp_config(crtc, NULL);
+		local_irq_restore(flags);
+	} else if (!strcmp(arg1, "flip")) {
+		mtk_drm_finish_page_flip(mtk_crtc);
+	} else if (!strcmp(arg1, "src") && arg2) {
+		ret = mtk_crtc_dbg_parse_src(mtk_crtc, arg2, &src);
+		if (!ret) {
+			mtk_crtc_vbl_switch(mtk_crtc, src);
+			drm_info(crtc->dev, "vblank source: %s (debugfs)\n",
+				 mtk_crtc_vbl_src_name(mtk_crtc, src));
+		}
+	} else if (!strcmp(arg1, "lc_off")) {
+		ret = -ENODEV;
+		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
+			struct device *cdev = mtk_crtc->ddp_comp[i]->dev;
+
+			if (cdev && (of_device_is_compatible(cdev->of_node, "mediatek,mt6785-disp-ovl") ||
+				     of_device_is_compatible(cdev->of_node, "mediatek,mt6785-disp-ovl-2l")))
+				ret = mtk_ovl_lc_off(cdev);
+		}
+	} else if (!strcmp(arg1, "rd") && arg2) {
+		ret = kstrtou32(arg2, 0, &addr);
+		reg = ret ? NULL : mtk_crtc_dbg_reg(mtk_crtc, addr);
+		if (!ret && !reg)
+			ret = -ERANGE;
+		mtk_crtc->dbg_rd_addr = addr;
+		mtk_crtc->dbg_rd_val = reg ? readl(reg) : 0;
+		mtk_crtc->dbg_rd_ret = ret;
+	} else if (!strcmp(arg1, "wr") && arg2 && p) {
+		if (!READ_ONCE(reg_writes))
+			return -EPERM;
+		ret = kstrtou32(arg2, 0, &addr);
+		if (!ret)
+			ret = kstrtou32(strim(p), 0, &val);
+		reg = ret ? NULL : mtk_crtc_dbg_reg(mtk_crtc, addr);
+		if (!ret && !reg)
+			ret = -ERANGE;
+		if (!ret) {
+			drm_info(crtc->dev, "debugfs: write 0x%08x = 0x%08x (was 0x%08x)\n",
+				 addr, val, readl(reg));
+			writel(val, reg);
+		}
+	} else {
+		ret = -EINVAL;
+	}
+	return ret;
+}
+
+static ssize_t mtk_crtc_dbg_action_write(struct file *file, const char __user *ubuf,
+					 size_t len, loff_t *ppos)
+{
+	struct mtk_crtc *mtk_crtc = file_inode(file)->i_private;
+	char buf[64];
+	int ret;
+
+	if (len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = 0;
+
+	mutex_lock(&mtk_crtc->dbg_lock);
+	ret = mtk_crtc_dbg_action(mtk_crtc, buf);
+	mutex_unlock(&mtk_crtc->dbg_lock);
+
+	return ret ? ret : len;
+}
+
+static const struct file_operations mtk_crtc_dbg_action_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = mtk_crtc_dbg_action_write,
+	.llseek = noop_llseek,
+};
+
+static int mtk_crtc_late_register(struct drm_crtc *crtc)
+{
+	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+	struct mtk_drm_private *priv = crtc->dev->dev_private;
+	unsigned int i;
+
+	if (!crtc->debugfs_entry)
+		return 0;
+
+	mtk_crtc->dbg_blk = devm_kcalloc(crtc->dev->dev, mtk_crtc->ddp_comp_nr + 2,
+					 sizeof(*mtk_crtc->dbg_blk), GFP_KERNEL);
+	if (mtk_crtc->dbg_blk) {
+		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+			if (mtk_crtc->ddp_comp[i]->dev)
+				mtk_crtc_dbg_add_blk(mtk_crtc, mtk_crtc->ddp_comp[i]->dev->of_node,
+						     dev_name(mtk_crtc->ddp_comp[i]->dev));
+		mtk_crtc_dbg_add_blk(mtk_crtc, mtk_crtc->mmsys_dev->of_node, "mmsys");
+		mtk_crtc_dbg_add_blk(mtk_crtc, priv->mutex_node, "mutex");
+	}
+
+	debugfs_create_file("lisbon_status", 0444, crtc->debugfs_entry, mtk_crtc,
+			    &mtk_crtc_dbg_status_fops);
+	debugfs_create_file("lisbon_action", 0200, crtc->debugfs_entry, mtk_crtc,
+			    &mtk_crtc_dbg_action_fops);
+	return 0;
+}
+#else
+static int mtk_crtc_late_register(struct drm_crtc *crtc)
+{
+	return 0;
+}
+#endif
+
 static const struct drm_crtc_funcs mtk_crtc_funcs = {
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= drm_atomic_helper_page_flip,
@@ -891,6 +1342,7 @@ static const struct drm_crtc_funcs mtk_crtc_funcs = {
 	.atomic_destroy_state	= mtk_crtc_destroy_state,
 	.enable_vblank		= mtk_crtc_enable_vblank,
 	.disable_vblank		= mtk_crtc_disable_vblank,
+	.late_register		= mtk_crtc_late_register,
 };
 
 static const struct drm_crtc_helper_funcs mtk_crtc_helper_funcs = {
@@ -901,6 +1353,7 @@ static const struct drm_crtc_helper_funcs mtk_crtc_helper_funcs = {
 	.atomic_flush	= mtk_crtc_atomic_flush,
 	.atomic_enable	= mtk_crtc_atomic_enable,
 	.atomic_disable	= mtk_crtc_atomic_disable,
+	.handle_vblank_timeout = mtk_crtc_handle_vblank_timeout,
 };
 
 static int mtk_crtc_init(struct drm_device *drm, struct mtk_crtc *mtk_crtc,
@@ -1127,6 +1580,8 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 	drm_crtc_enable_color_mgmt(&mtk_crtc->base, 0, has_ctm, gamma_lut_size);
 	mutex_init(&mtk_crtc->hw_lock);
 	spin_lock_init(&mtk_crtc->config_lock);
+	mutex_init(&mtk_crtc->dbg_lock);
+	INIT_DELAYED_WORK(&mtk_crtc->vbl_watch, mtk_crtc_vbl_watch);
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	i = priv->mbox_index++;
