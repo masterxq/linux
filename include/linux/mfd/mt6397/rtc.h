@@ -13,6 +13,7 @@
 #include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
+#include <linux/reboot-mode.h>
 
 #define RTC_BBPU               0x0000
 #define RTC_BBPU_CBUSY         BIT(6)
@@ -57,14 +58,31 @@
 #define RTC_AL_MTH_MASK        0x000f
 #define RTC_AL_YEA_MASK        0x007f
 
+/* first year of the 7 bit year register with mediatek,year-base-1968 */
+#define MTK_RTC_YEAR_BASE_1968	1968
+
+#define RTC_PDN1               0x002c
+/*
+ * RTC_PDN1 spare bits evaluated by the MediaTek bootloaders (MT6358/MT6359
+ * layout): bit 13 requests fastboot mode, bits 5:4 = 1 request recovery.
+ */
+#define RTC_PDN1_FAST_BOOT     BIT(13)
+#define RTC_PDN1_RECOVERY      GENMASK(5, 4)
+#define RTC_PDN1_REBOOT_MODE_MASK (RTC_PDN1_FAST_BOOT | RTC_PDN1_RECOVERY)
+
 #define RTC_PDN2               0x002e
 #define RTC_PDN2_PWRON_ALARM   BIT(4)
+
+#define RTC_PROT_MT6358        0x0034
+#define RTC_PROT_UNLOCK1       0x586a
+#define RTC_PROT_UNLOCK2       0x9136
 
 #define MTK_RTC_POLL_DELAY_US  10
 #define MTK_RTC_POLL_TIMEOUT   (jiffies_to_usecs(HZ))
 
 struct mtk_rtc_data {
 	u32                     wrtgr;
+	u32                     prot;	/* 0: no write interface protection known */
 };
 
 struct mt6397_rtc {
@@ -76,6 +94,9 @@ struct mt6397_rtc {
 	int                     irq;
 	u32                     addr_base;
 	const struct mtk_rtc_data *data;
+	struct reboot_mode_driver reboot_mode;
+	/* added to the year register to get tm_year (years since 1900) */
+	int			year_offset;
 };
 
 #endif /* _LINUX_MFD_MT6397_RTC_H_ */

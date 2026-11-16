@@ -13,6 +13,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
+#include <linux/string.h>
 #include <linux/mfd/mt6397/rtc.h>
 
 static int mtk_rtc_write_trigger(struct mt6397_rtc *rtc)
@@ -34,6 +35,76 @@ static int mtk_rtc_write_trigger(struct mt6397_rtc *rtc)
 			"failed to write WRTGR: %d\n", ret);
 
 	return ret;
+}
+
+/*
+ * Re-open the RTC write interface (RTC_PROT key sequence). The bootloaders do
+ * this on every boot and the RTC normally stays unlocked, but the reboot mode
+ * must not depend on that.
+ */
+static int mtk_rtc_unlock_writeif(struct mt6397_rtc *rtc)
+{
+	int ret;
+
+	ret = regmap_write(rtc->regmap, rtc->addr_base + rtc->data->prot,
+			   RTC_PROT_UNLOCK1);
+	if (!ret)
+		ret = mtk_rtc_write_trigger(rtc);
+	if (!ret)
+		ret = regmap_write(rtc->regmap, rtc->addr_base + rtc->data->prot,
+				   RTC_PROT_UNLOCK2);
+	if (!ret)
+		ret = mtk_rtc_write_trigger(rtc);
+
+	return ret;
+}
+
+/*
+ * Reboot mode: the magic value is written into the bootloader spare bits of
+ * RTC_PDN1 (RTC_PDN1_REBOOT_MODE_MASK), the remaining bits are preserved.
+ * The bootloader consumes and clears the request on the next boot.
+ */
+static int mtk_rtc_reboot_mode_write(struct reboot_mode_driver *reboot,
+				     unsigned int magic)
+{
+	struct mt6397_rtc *rtc = container_of(reboot, struct mt6397_rtc,
+					      reboot_mode);
+	u32 pdn1 = 0;
+	int ret;
+
+	if (magic & ~RTC_PDN1_REBOOT_MODE_MASK)
+		return -EINVAL;
+
+	mutex_lock(&rtc->lock);
+	ret = mtk_rtc_unlock_writeif(rtc);
+	if (!ret)
+		ret = regmap_update_bits(rtc->regmap, rtc->addr_base + RTC_PDN1,
+					 RTC_PDN1_REBOOT_MODE_MASK, magic);
+	if (!ret)
+		ret = mtk_rtc_write_trigger(rtc);
+	if (!ret)
+		ret = regmap_read(rtc->regmap, rtc->addr_base + RTC_PDN1, &pdn1);
+	mutex_unlock(&rtc->lock);
+
+	if (ret)
+		dev_err(reboot->dev, "failed to set reboot mode 0x%x: %d\n",
+			magic, ret);
+	else
+		dev_info(reboot->dev, "reboot mode 0x%x set, PDN1=0x%04x\n",
+			 magic, pdn1);
+
+	return ret;
+}
+
+static bool mtk_rtc_has_reboot_modes(const struct device_node *np)
+{
+	const struct property *prop;
+
+	for_each_property_of_node(np, prop)
+		if (strstarts(prop->name, "mode-"))
+			return true;
+
+	return false;
 }
 
 static irqreturn_t mtk_rtc_irq_handler_thread(int irq, void *data)
@@ -76,7 +147,7 @@ static int __mtk_rtc_read_time(struct mt6397_rtc *rtc,
 	tm->tm_mday = data[RTC_OFFSET_DOM];
 	tm->tm_wday = data[RTC_OFFSET_DOW];
 	tm->tm_mon = data[RTC_OFFSET_MTH] & RTC_TC_MTH_MASK;
-	tm->tm_year = data[RTC_OFFSET_YEAR];
+	tm->tm_year = data[RTC_OFFSET_YEAR] + rtc->year_offset;
 
 	ret = regmap_read(rtc->regmap, rtc->addr_base + RTC_TC_SEC, sec);
 exit:
@@ -118,7 +189,7 @@ static int mtk_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	data[RTC_OFFSET_DOM] = tm->tm_mday;
 	data[RTC_OFFSET_DOW] = tm->tm_wday;
 	data[RTC_OFFSET_MTH] = tm->tm_mon;
-	data[RTC_OFFSET_YEAR] = tm->tm_year;
+	data[RTC_OFFSET_YEAR] = tm->tm_year - rtc->year_offset;
 
 	mutex_lock(&rtc->lock);
 	ret = regmap_bulk_write(rtc->regmap, rtc->addr_base + RTC_TC_SEC,
@@ -164,7 +235,7 @@ static int mtk_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	tm->tm_hour = data[RTC_OFFSET_HOUR] & RTC_AL_HOU_MASK;
 	tm->tm_mday = data[RTC_OFFSET_DOM] & RTC_AL_DOM_MASK;
 	tm->tm_mon = data[RTC_OFFSET_MTH] & RTC_AL_MTH_MASK;
-	tm->tm_year = data[RTC_OFFSET_YEAR] & RTC_AL_YEA_MASK;
+	tm->tm_year = (data[RTC_OFFSET_YEAR] & RTC_AL_YEA_MASK) + rtc->year_offset;
 
 	tm->tm_mon--;
 
@@ -200,7 +271,7 @@ static int mtk_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	data[RTC_OFFSET_MTH] = ((data[RTC_OFFSET_MTH] & ~(RTC_AL_MTH_MASK)) |
 				(tm->tm_mon & RTC_AL_MTH_MASK));
 	data[RTC_OFFSET_YEAR] = ((data[RTC_OFFSET_YEAR] & ~(RTC_AL_YEA_MASK)) |
-				(tm->tm_year & RTC_AL_YEA_MASK));
+				((tm->tm_year - rtc->year_offset) & RTC_AL_YEA_MASK));
 
 	if (alm->enabled) {
 		ret = regmap_bulk_write(rtc->regmap,
@@ -288,12 +359,39 @@ static int mtk_rtc_probe(struct platform_device *pdev)
 	device_init_wakeup(&pdev->dev, true);
 
 	rtc->rtc_dev->ops = &mtk_rtc_ops;
-	rtc->rtc_dev->range_min = RTC_TIMESTAMP_BEGIN_1900;
-	rtc->rtc_dev->range_max = mktime64(2027, 12, 31, 23, 59, 59);
-	rtc->rtc_dev->start_secs = mktime64(1968, 1, 2, 0, 0, 0);
-	rtc->rtc_dev->set_start_time = true;
+	if (of_property_read_bool(pdev->dev.of_node, "mediatek,year-base-1968")) {
+		/*
+		 * Year register counts from 1968 like in MediaTek's bootloader
+		 * and vendor kernels (RTC_MIN_YEAR): 0..127 = 1968..2095.
+		 * 1968 is a leap year, so the hardware leap year rule
+		 * (year register divisible by 4) holds for the whole range.
+		 */
+		rtc->year_offset = MTK_RTC_YEAR_BASE_1968 - 1900;
+		rtc->rtc_dev->range_min = mktime64(MTK_RTC_YEAR_BASE_1968, 1, 1, 0, 0, 0);
+		rtc->rtc_dev->range_max = mktime64(MTK_RTC_YEAR_BASE_1968 + 127, 12, 31,
+						   23, 59, 59);
+	} else {
+		rtc->rtc_dev->range_min = RTC_TIMESTAMP_BEGIN_1900;
+		rtc->rtc_dev->range_max = mktime64(2027, 12, 31, 23, 59, 59);
+		rtc->rtc_dev->start_secs = mktime64(1968, 1, 2, 0, 0, 0);
+		rtc->rtc_dev->set_start_time = true;
+	}
 
-	return devm_rtc_register_device(rtc->rtc_dev);
+	ret = devm_rtc_register_device(rtc->rtc_dev);
+	if (ret)
+		return ret;
+
+	if (IS_REACHABLE(CONFIG_REBOOT_MODE) && rtc->data->prot &&
+	    mtk_rtc_has_reboot_modes(pdev->dev.of_node)) {
+		rtc->reboot_mode.dev = &pdev->dev;
+		rtc->reboot_mode.write = mtk_rtc_reboot_mode_write;
+		ret = devm_reboot_mode_register(&pdev->dev, &rtc->reboot_mode);
+		if (ret)
+			dev_warn(&pdev->dev,
+				 "failed to register reboot mode: %d\n", ret);
+	}
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -323,6 +421,7 @@ static SIMPLE_DEV_PM_OPS(mt6397_pm_ops, mt6397_rtc_suspend,
 
 static const struct mtk_rtc_data mt6358_rtc_data = {
 	.wrtgr = RTC_WRTGR_MT6358,
+	.prot = RTC_PROT_MT6358,
 };
 
 static const struct mtk_rtc_data mt6397_rtc_data = {
