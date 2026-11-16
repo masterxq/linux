@@ -555,6 +555,11 @@ static int mtk_drm_kms_init(struct drm_device *drm)
 	}
 
 	/* IGT will check if the cursor size is configured */
+	/*
+	 * GEM buffers are write-combined (dma_alloc_wc): reading them back with
+	 * the CPU is slow, CPU renderers should draw into a shadow buffer.
+	 */
+	drm->mode_config.prefer_shadow = true;
 	drm->mode_config.cursor_width = 512;
 	drm->mode_config.cursor_height = 512;
 
