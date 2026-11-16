@@ -46,6 +46,16 @@ static DEFINE_PER_CPU_READ_MOSTLY(struct psci_cpuidle_data, psci_cpuidle_data);
 static DEFINE_PER_CPU(struct psci_cpuidle_domain_state, psci_domain_state);
 static bool psci_cpuidle_use_syscore;
 
+/*
+ * DT idle states start disabled (CPUIDLE_FLAG_OFF, only WFI is used) unless
+ * states_on is set. Lets a board whose firmware support for CPU_SUSPEND is
+ * not proven yet describe the states and switch them on at run time through
+ * /sys/devices/system/cpu/cpuN/cpuidle/stateM/disable.
+ */
+static bool states_on;
+module_param(states_on, bool, 0444);
+MODULE_PARM_DESC(states_on, "use the DT idle states from boot (default: registered but disabled)");
+
 void psci_set_domain_state(struct generic_pm_domain *pd, unsigned int state_idx,
 			   u32 state)
 {
@@ -399,6 +409,13 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
 	ret = dt_init_idle_driver(drv, psci_idle_state_match, 1);
 	if (ret <= 0)
 		return ret ? : -ENODEV;
+
+	if (!states_on) {
+		int i;
+
+		for (i = 1; i < drv->state_count; i++)
+			drv->states[i].flags |= CPUIDLE_FLAG_OFF;
+	}
 
 	/*
 	 * Initialize PSCI idle states.
