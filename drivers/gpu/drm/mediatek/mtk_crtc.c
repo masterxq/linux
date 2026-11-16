@@ -960,9 +960,16 @@ enum drm_plane_type mtk_crtc_plane_type(unsigned int plane_idx,
 
 }
 
+/*
+ * Planes are numbered over all components of the path (OVL, then a cascaded
+ * OVL_2L blending on top of it): the zpos is that global index and the
+ * cursor is the topmost plane, not the last layer of the first OVL, which a
+ * cascaded OVL_2L would cover.
+ */
 static int mtk_crtc_init_comp_planes(struct drm_device *drm_dev,
 				     struct mtk_crtc *mtk_crtc,
-				     int comp_idx, int pipe)
+				     int comp_idx, int pipe,
+				     unsigned int total_planes)
 {
 	int num_planes = mtk_crtc_num_comp_planes(mtk_crtc, comp_idx);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[comp_idx];
@@ -972,12 +979,13 @@ static int mtk_crtc_init_comp_planes(struct drm_device *drm_dev,
 		ret = mtk_plane_init(drm_dev,
 				&mtk_crtc->planes[mtk_crtc->layer_nr],
 				BIT(pipe),
-				mtk_crtc_plane_type(mtk_crtc->layer_nr, num_planes),
+				mtk_crtc_plane_type(mtk_crtc->layer_nr, total_planes),
 				mtk_ddp_comp_supported_rotations(comp),
 				mtk_ddp_comp_get_blend_modes(comp),
 				mtk_ddp_comp_get_formats(comp),
 				mtk_ddp_comp_get_num_formats(comp),
-				mtk_ddp_comp_is_afbc_supported(comp), i);
+				mtk_ddp_comp_is_afbc_supported(comp),
+				mtk_crtc->layer_nr);
 		if (ret)
 			return ret;
 
@@ -1100,7 +1108,8 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 		return -ENOMEM;
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
-		ret = mtk_crtc_init_comp_planes(drm_dev, mtk_crtc, i, crtc_i);
+		ret = mtk_crtc_init_comp_planes(drm_dev, mtk_crtc, i, crtc_i,
+						num_comp_planes);
 		if (ret)
 			return ret;
 	}
