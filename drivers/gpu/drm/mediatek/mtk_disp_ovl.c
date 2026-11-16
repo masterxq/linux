@@ -33,6 +33,7 @@
 #define OVL_LAYER_AFBC_EN(n)				BIT(4+n)
 #define DISP_REG_OVL_ROI_BGCLR			0x0028
 #define DISP_REG_OVL_SRC_CON			0x002c
+#define OVL_SRC_CON_LC_EN				BIT(4)
 #define DISP_REG_OVL_CON(n)			(0x0030 + 0x20 * (n))
 #define DISP_REG_OVL_SRC_SIZE(n)		(0x0038 + 0x20 * (n))
 #define DISP_REG_OVL_OFFSET(n)			(0x003c + 0x20 * (n))
@@ -42,6 +43,8 @@
 #define OVL_CONST_BLEND					BIT(28)
 #define DISP_REG_OVL_RDMA_CTRL(n)		(0x00c0 + 0x20 * (n))
 #define DISP_REG_OVL_RDMA_GMC(n)		(0x00c8 + 0x20 * (n))
+#define DISP_REG_OVL_LC_CON			0x0280
+#define OVL_LC_CON_LSRC					GENMASK(29, 28)
 #define DISP_REG_OVL_ADDR_MT2701		0x0040
 #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
 #define OVL_CON_CLRFMT_BIT_DEPTH_MASK(n)		(GENMASK(1, 0) << (4 * (n)))
@@ -151,6 +154,12 @@ struct mtk_disp_ovl_data {
 	const u32 *formats;
 	size_t num_formats;
 	bool supports_clrfmt_ext;
+	/*
+	 * Extra "LC" input layer (SRC_CON bit 4), fed by the resizer in the
+	 * MediaTek vendor path OVL0_2L -> RSZ0 -> OVL0 (MT6785). Not used by
+	 * this driver; a bootloader may leave it enabled.
+	 */
+	bool has_lc_layer;
 };
 
 /*
@@ -175,8 +184,17 @@ static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 	/* Clear frame completion interrupt */
 	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
 
-	if (!priv->vblank_cb)
-		return IRQ_NONE;
+	if (!priv->vblank_cb) {
+		/*
+		 * Interrupts nobody asked for, e.g. left enabled by a bootloader
+		 * that keeps scanning out until the first modeset: switch them
+		 * off instead of returning IRQ_NONE at frame rate until the
+		 * line gets disabled as spurious. mtk_ovl_enable_vblank()
+		 * enables them again.
+		 */
+		writel(0x0, priv->regs + DISP_REG_OVL_INTEN);
+		return IRQ_HANDLED;
+	}
 
 	priv->vblank_cb(priv->vblank_cb_data);
 
@@ -311,11 +329,54 @@ static void mtk_ovl_set_bit_depth(struct device *dev, int idx, u32 format,
 			   OVL_CON_CLRFMT_BIT_DEPTH_MASK(idx));
 }
 
+/*
+ * The MT6785 bootloader (path OVL0_2L -> RSZ0 -> OVL0)
+ * leaves the LC layer of OVL0 on with the resizer as its source. This driver
+ * never feeds that input: OVL0 then starts every frame but never completes it
+ * (INTSTA START + UNDERFLOW, no FRAME_DONE), so no frame interrupt arrives
+ * and the path downstream starves. Diagnostic switch: ovl_lc_off=0 keeps the
+ * bootloader setting.
+ */
+static bool ovl_lc_off = true;
+module_param(ovl_lc_off, bool, 0644);
+MODULE_PARM_DESC(ovl_lc_off, "Switch off an OVL LC layer a bootloader left on (MT6785)");
+
+static void mtk_ovl_lc_layer_off(struct mtk_disp_ovl *ovl, struct device *dev,
+				 struct cmdq_pkt *cmdq_pkt)
+{
+	if (!cmdq_pkt) {
+		u32 src_con = readl(ovl->regs + DISP_REG_OVL_SRC_CON);
+
+		if (!(src_con & OVL_SRC_CON_LC_EN))
+			return;
+		dev_info(dev, "LC layer left on (SRC_CON 0x%08x LC_CON 0x%08x): off\n",
+			 src_con, readl(ovl->regs + DISP_REG_OVL_LC_CON));
+	}
+	mtk_ddp_write_mask(cmdq_pkt, 0, &ovl->cmdq_reg, ovl->regs,
+			   DISP_REG_OVL_SRC_CON, OVL_SRC_CON_LC_EN);
+	mtk_ddp_write_mask(cmdq_pkt, 0, &ovl->cmdq_reg, ovl->regs,
+			   DISP_REG_OVL_LC_CON, OVL_LC_CON_LSRC);
+}
+
+/* diagnostics (lisbon debugfs): switch the LC layer off now, regardless of ovl_lc_off */
+int mtk_ovl_lc_off(struct device *dev)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+
+	if (!ovl->data->has_lc_layer)
+		return -EOPNOTSUPP;
+	mtk_ovl_lc_layer_off(ovl, dev, NULL);
+	return 0;
+}
+
 void mtk_ovl_config(struct device *dev, unsigned int w,
 		    unsigned int h, unsigned int vrefresh,
 		    unsigned int bpc, struct cmdq_pkt *cmdq_pkt)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+
+	if (ovl->data->has_lc_layer && READ_ONCE(ovl_lc_off))
+		mtk_ovl_lc_layer_off(ovl, dev, cmdq_pkt);
 
 	if (w != 0 && h != 0)
 		mtk_ddp_write_relaxed(cmdq_pkt, h << 16 | w, &ovl->cmdq_reg, ovl->regs,
@@ -709,6 +770,34 @@ static const struct mtk_disp_ovl_data mt8183_ovl_2l_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+static const struct mtk_disp_ovl_data mt6785_ovl_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 10,
+	.layer_nr = 4,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.blend_modes = BIT(DRM_MODE_BLEND_PREMULTI) |
+		       BIT(DRM_MODE_BLEND_COVERAGE) |
+		       BIT(DRM_MODE_BLEND_PIXEL_NONE),
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.has_lc_layer = true,
+};
+
+static const struct mtk_disp_ovl_data mt6785_ovl_2l_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 10,
+	.layer_nr = 2,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.blend_modes = BIT(DRM_MODE_BLEND_PREMULTI) |
+		       BIT(DRM_MODE_BLEND_COVERAGE) |
+		       BIT(DRM_MODE_BLEND_PIXEL_NONE),
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.has_lc_layer = true,
+};
+
 static const struct mtk_disp_ovl_data mt8192_ovl_driver_data = {
 	.addr = DISP_REG_OVL_ADDR_MT8173,
 	.gmc_bits = 10,
@@ -753,6 +842,10 @@ static const struct mtk_disp_ovl_data mt8195_ovl_driver_data = {
 static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {
 	{ .compatible = "mediatek,mt2701-disp-ovl",
 	  .data = &mt2701_ovl_driver_data},
+	{ .compatible = "mediatek,mt6785-disp-ovl",
+	  .data = &mt6785_ovl_driver_data},
+	{ .compatible = "mediatek,mt6785-disp-ovl-2l",
+	  .data = &mt6785_ovl_2l_driver_data},
 	{ .compatible = "mediatek,mt8167-disp-ovl",
 	  .data = &mt8167_ovl_driver_data},
 	{ .compatible = "mediatek,mt8173-disp-ovl",

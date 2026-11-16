@@ -49,6 +49,13 @@ unsigned int mtk_dpi_encoder_index(struct device *dev);
 
 void mtk_dsi_ddp_start(struct device *dev);
 void mtk_dsi_ddp_stop(struct device *dev);
+int mtk_dsi_ddp_wait_blanking(struct device *dev);
+void mtk_dsi_ddp_register_vblank_cb(struct device *dev,
+				    void (*vblank_cb)(void *),
+				    void *vblank_cb_data);
+void mtk_dsi_ddp_unregister_vblank_cb(struct device *dev);
+void mtk_dsi_ddp_enable_vblank(struct device *dev);
+void mtk_dsi_ddp_disable_vblank(struct device *dev);
 unsigned int mtk_dsi_encoder_index(struct device *dev);
 
 int mtk_gamma_clk_enable(struct device *dev);
@@ -90,6 +97,7 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 			  struct mtk_plane_state *state,
 			  struct cmdq_pkt *cmdq_pkt);
 unsigned int mtk_ovl_layer_nr(struct device *dev);
+int mtk_ovl_lc_off(struct device *dev);
 void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 		      struct cmdq_pkt *cmdq_pkt);
 void mtk_ovl_layer_off(struct device *dev, unsigned int idx,

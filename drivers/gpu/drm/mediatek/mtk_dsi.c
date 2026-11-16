@@ -33,6 +33,8 @@
 #include "mtk_drm_drv.h"
 
 #define DSI_START		0x00
+#define DSI_START_EN			BIT(0)
+#define SKEWCAL_START			BIT(4)
 
 #define DSI_INTEN		0x08
 
@@ -42,6 +44,8 @@
 #define TE_RDY_INT_FLAG			BIT(2)
 #define VM_DONE_INT_FLAG		BIT(3)
 #define EXT_TE_RDY_INT_FLAG		BIT(4)
+#define VM_VFP_STR_INT_FLAG		BIT(10)	/* MT6785 (vendor DSI_INT_STATUS_REG) */
+#define SKEWCAL_DONE_INT_FLAG		BIT(11)
 #define DSI_BUSY			BIT(31)
 
 #define DSI_CON_CTRL		0x10
@@ -105,6 +109,14 @@
 
 #define DSI_RACK		0x84
 #define RACK				BIT(0)
+
+#define DSI_TIME_CON0		0xa0
+#define SKEWCAL_PRD			GENMASK(31, 16)
+
+#define DSI_PHY_SYNCON		0x10c
+#define HS_DB_SYNC_EN			BIT(24)
+/* sync codes 0xff/0xff, skew calibration pattern 0xaa (vendor DSI_MIPI_deskew) */
+#define PHY_SYNCON_DESKEW		0x00aaffff
 
 #define DSI_PHY_LCCON		0x104
 #define LC_HS_TX_EN			BIT(0)
@@ -194,6 +206,25 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	/* per-lane limit for mode_valid, kbit/s; 0 = 1500000 */
+	u32 max_data_rate_kbps;
+	/* run the D-PHY skew calibration before video above this rate, bit/s; 0 = never */
+	u32 deskew_min_rate;
+};
+
+/*
+ * Video-mode registers of a link the bootloader left running, captured at
+ * probe when the DT asks for it ("mediatek,inherit-boot-state"). They are
+ * used instead of the computed values for a mode of the same size, and the
+ * first power-on keeps the running link (no engine/D-PHY reset, no restart).
+ */
+struct mtk_dsi_boot_state {
+	bool valid;		/* registers captured */
+	bool running;		/* link still untouched since probe */
+	u32 mode_ctrl, txrx, psctrl, size;
+	u32 vsa, vbp, vfp, vact;
+	u32 hsa, hbp, hfp, hstx_ckl_wc;
+	u32 timcon[4];
 };
 
 struct mtk_dsi {
@@ -224,6 +255,11 @@ struct mtk_dsi {
 	u32 irq_data;
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
+	struct mtk_dsi_boot_state boot;
+	/* optional vblank source for mediatek-drm: start of the vertical front porch */
+	void (*vblank_cb)(void *data);
+	void *vblank_cb_data;
+	bool vblank_en;
 };
 
 static inline struct mtk_dsi *bridge_to_dsi(struct drm_bridge *b)
@@ -241,6 +277,15 @@ static void mtk_dsi_mask(struct mtk_dsi *dsi, u32 offset, u32 mask, u32 data)
 	u32 temp = readl(dsi->regs + offset);
 
 	writel((temp & ~mask) | (data & mask), dsi->regs + offset);
+}
+
+/* boot registers may stand in for computed ones: same picture size */
+static bool mtk_dsi_boot_timing_usable(struct mtk_dsi *dsi)
+{
+	return dsi->boot.valid &&
+	       dsi->boot.vact == dsi->vm.vactive &&
+	       FIELD_GET(DSI_PS_WC, dsi->boot.psctrl) ==
+			dsi->vm.hactive * (dsi->format == MIPI_DSI_FMT_RGB565 ? 2 : 3);
 }
 
 static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
@@ -283,6 +328,23 @@ static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
 	timcon3 = FIELD_PREP(CLK_HS_PREP, timing->clk_hs_prepare) |
 		  FIELD_PREP(CLK_HS_POST, timing->clk_hs_post) |
 		  FIELD_PREP(CLK_HS_EXIT, timing->clk_hs_exit);
+
+	if (mtk_dsi_boot_timing_usable(dsi)) {
+		dev_info(dsi->dev,
+			 "D-PHY timing from boot state %08x %08x %08x %08x (computed %08x %08x %08x %08x)\n",
+			 dsi->boot.timcon[0], dsi->boot.timcon[1], dsi->boot.timcon[2],
+			 dsi->boot.timcon[3], timcon0, timcon1, timcon2, timcon3);
+		timcon0 = dsi->boot.timcon[0];
+		timcon1 = dsi->boot.timcon[1];
+		timcon2 = dsi->boot.timcon[2];
+		timcon3 = dsi->boot.timcon[3];
+		/* keep the derived values used elsewhere consistent */
+		timing->lpx = FIELD_GET(LPX, timcon0);
+		timing->da_hs_prepare = FIELD_GET(HS_PREP, timcon0);
+		timing->da_hs_zero = FIELD_GET(HS_ZERO, timcon0);
+		timing->da_hs_trail = FIELD_GET(HS_TRAIL, timcon0);
+		timing->da_hs_exit = FIELD_GET(DA_HS_EXIT, timcon1);
+	}
 
 	writel(timcon0, dsi->regs + DSI_PHY_TIMECON0);
 	writel(timcon1, dsi->regs + DSI_PHY_TIMECON1);
@@ -390,6 +452,12 @@ static void mtk_dsi_rxtx_control(struct mtk_dsi *dsi)
 	if (dsi->mode_flags & MIPI_DSI_MODE_NO_EOT_PACKET)
 		regval |= DIS_EOT;
 
+	if (mtk_dsi_boot_timing_usable(dsi) && regval != dsi->boot.txrx) {
+		dev_info(dsi->dev, "TXRX_CTRL from boot state 0x%08x (computed 0x%08x)\n",
+			 dsi->boot.txrx, regval);
+		regval = dsi->boot.txrx;
+	}
+
 	writel(regval, dsi->regs + DSI_TXRX_CTRL);
 }
 
@@ -423,6 +491,10 @@ static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
 		ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_16BIT_RGB565);
 		break;
 	}
+
+	/* keep bootloader bits such as the custom header field (lisbon lk: 0x0b) */
+	if (mtk_dsi_boot_timing_usable(dsi))
+		ps_val = dsi->boot.psctrl;
 
 	if (config_vact) {
 		vact_nl = FIELD_PREP(VACT_NL, dsi->vm.vactive);
@@ -584,6 +656,23 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 	else
 		mtk_dsi_config_vdo_timing_per_line_lp(dsi);
 
+	if (mtk_dsi_boot_timing_usable(dsi)) {
+		dev_info(dsi->dev,
+			 "video timing from boot state: HSA/HBP/HFP %u/%u/0x%x V %u/%u/%u (computed %u/%u/0x%x V %u/%u/%u)\n",
+			 dsi->boot.hsa, dsi->boot.hbp, dsi->boot.hfp,
+			 dsi->boot.vsa, dsi->boot.vbp, dsi->boot.vfp,
+			 readl(dsi->regs + DSI_HSA_WC), readl(dsi->regs + DSI_HBP_WC),
+			 readl(dsi->regs + DSI_HFP_WC),
+			 vm->vsync_len, vm->vback_porch, vm->vfront_porch);
+		writel(dsi->boot.vsa, dsi->regs + DSI_VSA_NL);
+		writel(dsi->boot.vbp, dsi->regs + DSI_VBP_NL);
+		writel(dsi->boot.vfp, dsi->regs + DSI_VFP_NL);
+		writel(dsi->boot.hsa, dsi->regs + DSI_HSA_WC);
+		writel(dsi->boot.hbp, dsi->regs + DSI_HBP_WC);
+		writel(dsi->boot.hfp, dsi->regs + DSI_HFP_WC);
+		writel(dsi->boot.hstx_ckl_wc, dsi->regs + DSI_HSTX_CKL_WC);
+	}
+
 	mtk_dsi_ps_control(dsi, false);
 }
 
@@ -598,6 +687,94 @@ static void mtk_dsi_stop(struct mtk_dsi *dsi)
 	writel(0, dsi->regs + DSI_START);
 }
 
+/*
+ * D-PHY v1.2 initial skew calibration, required by receivers above 1.5 Gbit/s
+ * per lane. Sequence of the vendor driver (DSI_MIPI_deskew):
+ * engine stopped, deskew sync codes, HS_DB_SYNC_EN, DA_HS_SYNC = 2, then
+ * SKEWCAL_START and wait for SKEWCAL_DONE; restore afterwards.
+ */
+static void mtk_dsi_deskew(struct mtk_dsi *dsi)
+{
+	u32 syncon, timcon2, val;
+	int ret;
+
+	syncon = readl(dsi->regs + DSI_PHY_SYNCON);
+	timcon2 = readl(dsi->regs + DSI_PHY_TIMECON2);
+
+	writel(PHY_SYNCON_DESKEW, dsi->regs + DSI_PHY_SYNCON);
+	mtk_dsi_mask(dsi, DSI_TIME_CON0, SKEWCAL_PRD, FIELD_PREP(SKEWCAL_PRD, 20));
+	writel(0, dsi->regs + DSI_START);
+	writel(0, dsi->regs + DSI_INTSTA);
+
+	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val, !(val & DSI_BUSY),
+				 10, 50000);
+	if (ret)
+		dev_warn(dsi->dev, "deskew: engine still busy (0x%08x)\n", val);
+
+	mtk_dsi_mask(dsi, DSI_PHY_SYNCON, HS_DB_SYNC_EN, HS_DB_SYNC_EN);
+	mtk_dsi_mask(dsi, DSI_PHY_TIMECON2, DA_HS_SYNC, FIELD_PREP(DA_HS_SYNC, 2));
+	mtk_dsi_mask(dsi, DSI_INTSTA, SKEWCAL_DONE_INT_FLAG, 0);
+	mtk_dsi_mask(dsi, DSI_START, SKEWCAL_START, 0);
+	mtk_dsi_mask(dsi, DSI_START, SKEWCAL_START, SKEWCAL_START);
+
+	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
+				 val & SKEWCAL_DONE_INT_FLAG, 10, 50000);
+	if (ret)
+		dev_warn(dsi->dev, "deskew: no SKEWCAL_DONE (0x%08x)\n", val);
+	else
+		dev_dbg(dsi->dev, "deskew done at %u bit/s\n", dsi->data_rate);
+
+	mtk_dsi_mask(dsi, DSI_START, SKEWCAL_START, 0);
+	mtk_dsi_mask(dsi, DSI_INTSTA, SKEWCAL_DONE_INT_FLAG, 0);
+	writel(syncon, dsi->regs + DSI_PHY_SYNCON);
+	writel(timcon2, dsi->regs + DSI_PHY_TIMECON2);
+}
+
+/*
+ * Capture a video-mode link the bootloader left running (DT property
+ * "mediatek,inherit-boot-state"). Only reads; the bootloader's clocks and
+ * power domain are still on at this point (they are what keeps its picture
+ * on the screen), nothing is enabled or disabled here.
+ */
+static void mtk_dsi_capture_boot_state(struct mtk_dsi *dsi)
+{
+	struct mtk_dsi_boot_state *b = &dsi->boot;
+	u32 start;
+	int i;
+
+	if (!of_property_read_bool(dsi->dev->of_node, "mediatek,inherit-boot-state"))
+		return;
+
+	start = readl(dsi->regs + DSI_START);
+	b->mode_ctrl = readl(dsi->regs + DSI_MODE_CTRL);
+	if (!(start & DSI_START_EN) || (b->mode_ctrl & MODE) == CMD_MODE) {
+		dev_info(dsi->dev, "boot state: link not running in video mode (start 0x%x mode 0x%x)\n",
+			 start, b->mode_ctrl);
+		return;
+	}
+
+	b->txrx = readl(dsi->regs + DSI_TXRX_CTRL);
+	b->psctrl = readl(dsi->regs + DSI_PSCTRL);
+	b->size = readl(dsi->regs + DSI_SIZE_CON);
+	b->vsa = readl(dsi->regs + DSI_VSA_NL);
+	b->vbp = readl(dsi->regs + DSI_VBP_NL);
+	b->vfp = readl(dsi->regs + DSI_VFP_NL);
+	b->vact = readl(dsi->regs + DSI_VACT_NL) & VACT_NL;
+	b->hsa = readl(dsi->regs + DSI_HSA_WC);
+	b->hbp = readl(dsi->regs + DSI_HBP_WC);
+	b->hfp = readl(dsi->regs + DSI_HFP_WC);
+	b->hstx_ckl_wc = readl(dsi->regs + DSI_HSTX_CKL_WC);
+	for (i = 0; i < 4; i++)
+		b->timcon[i] = readl(dsi->regs + DSI_PHY_TIMECON0 + 4 * i);
+	b->valid = true;
+	b->running = true;
+
+	dev_info(dsi->dev,
+		 "boot state: mode %u txrx 0x%x ps 0x%x V %u/%u/%u/%u H %u/%u/0x%x timcon %08x %08x %08x %08x\n",
+		 b->mode_ctrl & MODE, b->txrx, b->psctrl, b->vsa, b->vbp, b->vfp, b->vact,
+		 b->hsa, b->hbp, b->hfp, b->timcon[0], b->timcon[1], b->timcon[2], b->timcon[3]);
+}
+
 static void mtk_dsi_set_cmd_mode(struct mtk_dsi *dsi)
 {
 	writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
@@ -607,6 +784,8 @@ static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
 {
 	u32 inten = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
 
+	if (READ_ONCE(dsi->vblank_en))
+		inten |= VM_VFP_STR_INT_FLAG;
 	writel(inten, dsi->regs + DSI_INTEN);
 }
 
@@ -640,19 +819,41 @@ static s32 mtk_dsi_wait_for_irq_done(struct mtk_dsi *dsi, u32 irq_flag,
 	return ret;
 }
 
+/*
+ * Upper bound for the read-acknowledge loop in the interrupt handler, about
+ * 20 ms (more than a frame at 60 Hz). In video mode DSI_BUSY stays set while a
+ * frame is sent; a link that stalls with BUSY set must not hang the CPU in
+ * hard interrupt context.
+ */
+#define DSI_RACK_POLLS		20000
+
 static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 {
 	struct mtk_dsi *dsi = dev_id;
-	u32 status, tmp;
+	u32 status, tmp = 0;
 	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+	unsigned int polls;
 
-	status = readl(dsi->regs + DSI_INTSTA) & flag;
+	status = readl(dsi->regs + DSI_INTSTA);
 
+	if (READ_ONCE(dsi->vblank_en) && (status & VM_VFP_STR_INT_FLAG)) {
+		mtk_dsi_mask(dsi, DSI_INTSTA, VM_VFP_STR_INT_FLAG, 0);
+		if (dsi->vblank_cb)
+			dsi->vblank_cb(dsi->vblank_cb_data);
+	}
+
+	status &= flag;
 	if (status) {
-		do {
+		for (polls = 0; polls < DSI_RACK_POLLS; polls++) {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
-		} while (tmp & DSI_BUSY);
+			if (!(tmp & DSI_BUSY))
+				break;
+			udelay(1);
+		}
+		if (polls == DSI_RACK_POLLS)
+			dev_warn_ratelimited(dsi->dev, "irq: still busy after %u polls (INTSTA 0x%08x, status 0x%x)\n",
+					     polls, tmp, status);
 
 		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
 		mtk_dsi_irq_data_set(dsi, status);
@@ -691,6 +892,17 @@ static void mtk_dsi_lane_ready(struct mtk_dsi *dsi)
 	}
 }
 
+/*
+ * Takeover of the link a bootloader left running: by default the first
+ * enable keeps it (no engine reset, no restart, no deskew). With
+ * keep_boot_link=0 the first enable does the full setup instead (engine
+ * reset, timing from the boot registers, video restart with deskew); the
+ * receiver behind the link then has to lock again.
+ */
+static bool keep_boot_link = true;
+module_param(keep_boot_link, bool, 0644);
+MODULE_PARM_DESC(keep_boot_link, "Keep a video link the bootloader left running on the first enable");
+
 static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 {
 	struct device *dev = dsi->host.dev;
@@ -728,6 +940,24 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	if (ret < 0) {
 		dev_err(dev, "Failed to enable digital clock: %d\n", ret);
 		goto err_disable_engine_clk;
+	}
+
+	if (dsi->boot.running && !keep_boot_link) {
+		dev_info(dev, "boot link restarted (keep_boot_link=0)\n");
+		dsi->boot.running = false;
+	}
+
+	if (dsi->boot.running) {
+		if (mtk_dsi_boot_timing_usable(dsi)) {
+			/* take over the running link as it is */
+			dev_info(dev, "keeping the link the bootloader started (%u bit/s requested)\n",
+				 dsi->data_rate);
+			dsi->lanes_ready = true;
+			mtk_dsi_set_interrupt_enable(dsi);
+			return 0;
+		}
+		dev_info(dev, "boot state does not match the mode, full setup\n");
+		dsi->boot.running = false;
 	}
 
 	mtk_dsi_enable(dsi);
@@ -793,7 +1023,18 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 	if (dsi->enabled)
 		return;
 
+	if (dsi->boot.running) {
+		/* link kept running since the bootloader: no restart */
+		dsi->boot.running = false;
+		dsi->enabled = true;
+		return;
+	}
+
 	mtk_dsi_set_mode(dsi);
+	if (dsi->driver_data->deskew_min_rate &&
+	    dsi->data_rate > dsi->driver_data->deskew_min_rate &&
+	    (dsi->mode_flags & MIPI_DSI_MODE_VIDEO))
+		mtk_dsi_deskew(dsi);
 	mtk_dsi_start(dsi);
 
 	dsi->enabled = true;
@@ -881,7 +1122,8 @@ mtk_dsi_bridge_mode_valid(struct drm_bridge *bridge,
 	if (bpp < 0)
 		return MODE_ERROR;
 
-	if (mode->clock * bpp / dsi->lanes > 1500000)
+	if (mode->clock * bpp / dsi->lanes >
+	    (dsi->driver_data->max_data_rate_kbps ?: 1500000))
 		return MODE_CLOCK_HIGH;
 
 	return MODE_OK;
@@ -907,11 +1149,73 @@ void mtk_dsi_ddp_start(struct device *dev)
 	mtk_dsi_poweron(dsi);
 }
 
+/*
+ * Takeover: wait until the running video link enters the vertical front
+ * porch, so that mediatek-drm re-programs mutex, routing and the engines
+ * between two frames (lisbon: VFP 2580 of 5062 lines, about 8.5 ms).
+ */
+int mtk_dsi_ddp_wait_blanking(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 val;
+	int ret;
+
+	if (!dsi->boot.running)
+		return -EOPNOTSUPP;
+
+	mtk_dsi_mask(dsi, DSI_INTSTA, VM_VFP_STR_INT_FLAG, 0);
+	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
+				 val & VM_VFP_STR_INT_FLAG, 20, 50000);
+	if (ret)
+		dev_warn(dev, "takeover: no vertical front porch within 50 ms (INTSTA 0x%08x)\n", val);
+	return ret;
+}
+
 void mtk_dsi_ddp_stop(struct device *dev)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
 
 	mtk_dsi_poweroff(dsi);
+}
+
+/*
+ * Optional vblank source (selected by mediatek-drm, not the default): the
+ * start of the vertical front porch of a video-mode link. Only valid while the
+ * engine is powered, which is the case whenever the CRTC has vblank enabled.
+ */
+void mtk_dsi_ddp_register_vblank_cb(struct device *dev,
+				    void (*vblank_cb)(void *),
+				    void *vblank_cb_data)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	dsi->vblank_cb = vblank_cb;
+	dsi->vblank_cb_data = vblank_cb_data;
+}
+
+void mtk_dsi_ddp_unregister_vblank_cb(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	dsi->vblank_cb = NULL;
+	dsi->vblank_cb_data = NULL;
+}
+
+void mtk_dsi_ddp_enable_vblank(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	WRITE_ONCE(dsi->vblank_en, true);
+	mtk_dsi_mask(dsi, DSI_INTSTA, VM_VFP_STR_INT_FLAG, 0);
+	mtk_dsi_mask(dsi, DSI_INTEN, VM_VFP_STR_INT_FLAG, VM_VFP_STR_INT_FLAG);
+}
+
+void mtk_dsi_ddp_disable_vblank(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	WRITE_ONCE(dsi->vblank_en, false);
+	mtk_dsi_mask(dsi, DSI_INTEN, VM_VFP_STR_INT_FLAG, 0);
 }
 
 static int mtk_dsi_encoder_init(struct drm_device *drm, struct mtk_dsi *dsi)
@@ -1211,6 +1515,7 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	if (IS_ERR(dsi))
 		return PTR_ERR(dsi);
 
+	dsi->dev = dev;
 	dsi->driver_data = of_device_get_match_data(dev);
 
 	dsi->engine_clk = devm_clk_get(dev, "engine");
@@ -1250,6 +1555,8 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	ret = mipi_dsi_host_register(&dsi->host);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to register DSI host\n");
+
+	mtk_dsi_capture_boot_state(dsi);
 
 	writel(0, dsi->regs + DSI_INTSTA);
 	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
@@ -1293,6 +1600,22 @@ static const struct mtk_dsi_driver_data mt8183_dsi_driver_data = {
 	.has_size_ctl = true,
 };
 
+/*
+ * MT6785: register layout of MT8183; the lisbon link (to an MT6382 bridge)
+ * runs at 2.3 Gbit/s per lane, which the vendor kernel drives with a
+ * skew calibration above 1.7 Gbit/s (RX_V12); D-PHY v1.2 requires it above
+ * 1.5 Gbit/s.
+ */
+static const struct mtk_dsi_driver_data mt6785_dsi_driver_data = {
+	.reg_cmdq_off = 0x200,
+	.reg_vm_cmd_off = 0x130,
+	.reg_shadow_dbg_off = 0x190,
+	.has_shadow_ctl = true,
+	.has_size_ctl = true,
+	.max_data_rate_kbps = 2500000,
+	.deskew_min_rate = 1500000000,
+};
+
 static const struct mtk_dsi_driver_data mt8186_dsi_driver_data = {
 	.reg_cmdq_off = 0xd00,
 	.reg_vm_cmd_off = 0x200,
@@ -1313,6 +1636,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6785-dsi", .data = &mt6785_dsi_driver_data },
 	{ .compatible = "mediatek,mt8167-dsi", .data = &mt2701_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
