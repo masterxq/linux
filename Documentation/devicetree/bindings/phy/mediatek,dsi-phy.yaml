@@ -67,6 +67,13 @@ properties:
     items:
       - const: calibration-data
 
+  mediatek,inherit-boot-state:
+    type: boolean
+    description:
+      The bootloader leaves the link running; the driver captures its state
+      at probe and keeps it on the first enable instead of restarting the
+      link.
+
   drive-strength-microamp:
     description: adjust driving current
     multipleOf: 200

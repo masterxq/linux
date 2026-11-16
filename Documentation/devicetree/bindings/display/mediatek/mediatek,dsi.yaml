@@ -47,6 +47,13 @@ properties:
   interrupts:
     maxItems: 1
 
+  mediatek,inherit-boot-state:
+    type: boolean
+    description:
+      The bootloader leaves the link running; the driver captures its state
+      at probe and keeps it on the first enable instead of restarting the
+      link.
+
   power-domains:
     maxItems: 1
 
