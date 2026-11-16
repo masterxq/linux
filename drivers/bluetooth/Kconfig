@@ -453,6 +453,19 @@ config BT_MTKUART
 	  Say Y here to compile support for MediaTek Bluetooth UART devices
 	  into the kernel or say M to compile it as module (btmtkuart).
 
+config BT_MTKSTP
+	tristate "MediaTek CONNAC1 consys Bluetooth (STP over BTIF)"
+	depends on MTK_CONNAC1_CONSYS || (COMPILE_TEST && !MTK_CONNAC1_CONSYS)
+	depends on OF
+	help
+	  Bluetooth part of the connectivity subsystem integrated in
+	  MediaTek SoCs with a CONNAC1 consys such as the MT6785. HCI
+	  packets travel over the STP link of the consys driver, which
+	  also switches the Bluetooth function on and off.
+
+	  Say Y here to compile support into the kernel or say M to
+	  compile it as module (btmtkstp).
+
 config BT_QCOMSMD
 	tristate "Qualcomm SMD based HCI support"
 	depends on RPMSG || (COMPILE_TEST && RPMSG=n)
