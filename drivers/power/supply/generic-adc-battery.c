@@ -48,6 +48,7 @@ struct gab {
 	struct delayed_work bat_work;
 	int status;
 	struct gpio_desc *charge_finished;
+	struct power_supply_battery_info *info;
 };
 
 static struct gab *to_generic_bat(struct power_supply *psy)
@@ -64,6 +65,12 @@ static void gab_ext_power_changed(struct power_supply *psy)
 
 static const enum power_supply_property gab_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
+	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
 };
 
 /*
@@ -98,8 +105,37 @@ static int gab_read_channel(struct gab *adc_bat, enum gab_chan_type channel,
 	if (channel == GAB_TEMP)
 		*result /= 100; /* Convert from milli- to deci-degree */
 	else
-		*result *= 1000;
+		*result *= 1000;	/* IIO mV/mA/mW -> uV/uA/uW */
 
+	return 0;
+}
+
+/*
+ * Rough state of charge from the open circuit voltage table of the
+ * monitored battery. The terminal voltage is corrected by I * R when a
+ * current channel and the internal resistance are known; otherwise the
+ * estimate reads high while charging and low under load.
+ */
+static int gab_get_capacity(struct gab *adc_bat, int *cap)
+{
+	struct power_supply_battery_info *info = adc_bat->info;
+	int uv, ua = 0, temp = 250, ret;
+
+	if (!info || !power_supply_find_ocv2cap_table(info, 20, &ret))
+		return -ENODATA;
+
+	ret = gab_read_channel(adc_bat, GAB_VOLTAGE, &uv);
+	if (ret < 0)
+		return ret;
+
+	if (adc_bat->channel[GAB_CURRENT] && info->factory_internal_resistance_uohm > 0 &&
+	    !gab_read_channel(adc_bat, GAB_CURRENT, &ua))
+		uv += div_s64((s64)ua * info->factory_internal_resistance_uohm, 1000000);
+
+	if (adc_bat->channel[GAB_TEMP])
+		gab_read_channel(adc_bat, GAB_TEMP, &temp);
+
+	*cap = power_supply_batinfo_ocv2cap(info, uv, temp / 10);
 	return 0;
 }
 
@@ -120,6 +156,16 @@ static int gab_get_property(struct power_supply *psy,
 		return gab_read_channel(adc_bat, GAB_POWER, &val->intval);
 	case POWER_SUPPLY_PROP_TEMP:
 		return gab_read_channel(adc_bat, GAB_TEMP, &val->intval);
+	case POWER_SUPPLY_PROP_CAPACITY:
+		return gab_get_capacity(adc_bat, &val->intval);
+	case POWER_SUPPLY_PROP_TECHNOLOGY:
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
+		if (!adc_bat->info)
+			return -ENODATA;
+		return power_supply_battery_info_get_prop(adc_bat->info, psp, val);
 	default:
 		return -EINVAL;
 	}
@@ -255,6 +301,13 @@ static int gab_probe(struct platform_device *pdev)
 				"battery charged", adc_bat);
 		if (ret < 0)
 			return ret;
+	}
+
+	/* Optional: OCV table and design data of the monitored battery */
+	ret = power_supply_get_battery_info(adc_bat->psy, &adc_bat->info);
+	if (ret) {
+		dev_info(&pdev->dev, "no battery info (%d), capacity unavailable\n", ret);
+		adc_bat->info = NULL;
 	}
 
 	platform_set_drvdata(pdev, adc_bat);
