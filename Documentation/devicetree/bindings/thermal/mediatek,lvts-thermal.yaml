@@ -49,12 +49,14 @@ properties:
     items:
       - description: Calibration eFuse data 1 for LVTS
       - description: Calibration eFuse data 2 for LVTS
+      - description: Calibration eFuse data 3 for LVTS
 
   nvmem-cell-names:
     minItems: 1
     items:
       - const: lvts-calib-data-1
       - const: lvts-calib-data-2
+      - const: lvts-calib-data-3
 
   "#thermal-sensor-cells":
     const: 1
@@ -91,9 +93,11 @@ allOf:
       properties:
         nvmem-cells:
           minItems: 2
+          maxItems: 2
 
         nvmem-cell-names:
           minItems: 2
+          maxItems: 2
 
   - if:
       properties:
