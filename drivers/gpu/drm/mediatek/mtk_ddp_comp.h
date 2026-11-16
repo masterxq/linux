@@ -75,6 +75,7 @@ struct mtk_ddp_comp_funcs {
 	unsigned int (*gamma_get_lut_size)(struct device *dev);
 	void (*gamma_set)(struct device *dev,
 			  struct drm_crtc_state *state);
+	int (*wait_blanking)(struct device *dev);
 	void (*bgclr_in_on)(struct device *dev);
 	void (*bgclr_in_off)(struct device *dev);
 	void (*ctm_set)(struct device *dev,
@@ -240,6 +241,18 @@ static inline void mtk_ddp_gamma_set(struct mtk_ddp_comp *comp,
 {
 	if (comp->funcs && comp->funcs->gamma_set)
 		comp->funcs->gamma_set(comp->dev, state);
+}
+
+/*
+ * Wait for the vertical blanking of a link a bootloader left running, so that
+ * the path can be re-programmed between two frames. -EOPNOTSUPP: no such
+ * link or no support; 0: in the blanking now.
+ */
+static inline int mtk_ddp_comp_wait_blanking(struct mtk_ddp_comp *comp)
+{
+	if (comp->funcs && comp->funcs->wait_blanking)
+		return comp->funcs->wait_blanking(comp->dev);
+	return -EOPNOTSUPP;
 }
 
 static inline void mtk_ddp_comp_bgclr_in_on(struct mtk_ddp_comp *comp)

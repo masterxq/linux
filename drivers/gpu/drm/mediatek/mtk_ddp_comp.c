@@ -319,6 +319,11 @@ static const struct mtk_ddp_comp_funcs ddp_dsc = {
 static const struct mtk_ddp_comp_funcs ddp_dsi = {
 	.start = mtk_dsi_ddp_start,
 	.stop = mtk_dsi_ddp_stop,
+	.wait_blanking = mtk_dsi_ddp_wait_blanking,
+	.register_vblank_cb = mtk_dsi_ddp_register_vblank_cb,
+	.unregister_vblank_cb = mtk_dsi_ddp_unregister_vblank_cb,
+	.enable_vblank = mtk_dsi_ddp_enable_vblank,
+	.disable_vblank = mtk_dsi_ddp_disable_vblank,
 	.encoder_index = mtk_dsi_encoder_index,
 };
 
