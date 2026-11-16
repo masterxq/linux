@@ -219,6 +219,24 @@ config DRM_LVDS_CODEC
 	  Support for transparent LVDS encoders and decoders that don't
 	  require any configuration.
 
+config DRM_MEDIATEK_MT6382
+	tristate "MediaTek MT6382 MIPI-DSI bridge (SPI control)"
+	depends on OF && SPI
+	select REGMAP
+	select DRM_KMS_HELPER
+	select DRM_MIPI_DSI
+	select DRM_PANEL
+	help
+	  Support for the MediaTek MT6382 MIPI-DSI to MIPI-DSI bridge with
+	  Display Stream Compression, found e.g. in the Motorola Moto G60s:
+	  SPI control interface and a DRM bridge that takes over the
+	  bridge as the bootloader left it.
+
+	  By default the driver only takes over a bridge that the bootloader
+	  has already initialised: it checks the chip ID and exposes the
+	  bridge registers read-only through debugfs. Resetting and
+	  re-initialising the chip has to be enabled with module parameters.
+
 config DRM_MEGACHIPS_STDPXXXX_GE_B850V3_FW
 	tristate "MegaChips stdp4028-ge-b850v3-fw and stdp2690-ge-b850v3-fw"
 	depends on OF
