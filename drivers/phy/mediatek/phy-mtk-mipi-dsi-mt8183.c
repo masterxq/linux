@@ -72,13 +72,33 @@ static int mtk_mipi_tx_pll_enable(struct clk_hw *hw)
 		return -EINVAL;
 	}
 
+	pcw = div_u64(((u64)mipi_tx->data_rate * txdiv) << 24, 26000000);
+
+	/*
+	 * PLL left running by the bootloader at (nearly) this rate: keep it,
+	 * relocking would interrupt the link to a receiver that is still in
+	 * sync (1000 ppm covers rounding of the mode clock).
+	 */
+	if (mipi_tx->boot_pll_on && mipi_tx->boot_posdiv == txdiv0 &&
+	    abs_diff(pcw, (u64)mipi_tx->boot_pcw) <= div_u64(pcw, 1000)) {
+		dev_info(mipi_tx->dev, "PLL kept: PCW 0x%08x (0x%08llx for %u bit/s)\n",
+			 mipi_tx->boot_pcw, pcw, mipi_tx->data_rate);
+		mipi_tx->boot_pll_on = false;
+		return 0;
+	}
+	if (mipi_tx->boot_pll_on) {
+		dev_info(mipi_tx->dev, "boot PLL PCW 0x%08x posdiv %u differs, reprogramming for %u bit/s\n",
+			 mipi_tx->boot_pcw, mipi_tx->boot_posdiv, mipi_tx->data_rate);
+		mipi_tx->boot_pll_on = false;
+		mipi_tx->boot_signal_on = false;
+	}
+
 	mtk_phy_clear_bits(base + MIPITX_PLL_CON4, RG_DSI_PLL_IBIAS);
 
 	mtk_phy_set_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_PWR_ON);
 	mtk_phy_clear_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
 	udelay(1);
 	mtk_phy_clear_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_ISO_EN);
-	pcw = div_u64(((u64)mipi_tx->data_rate * txdiv) << 24, 26000000);
 	writel(pcw, base + MIPITX_PLL_CON0);
 	mtk_phy_update_field(base + MIPITX_PLL_CON1, RG_DSI_PLL_POSDIV, txdiv0);
 	mtk_phy_set_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
@@ -112,6 +132,71 @@ static const struct clk_ops mtk_mipi_tx_pll_ops = {
 	.set_rate = mtk_mipi_tx_pll_set_rate,
 	.recalc_rate = mtk_mipi_tx_pll_recalc_rate,
 };
+
+/*
+ * MT6785 drives the same PHY up to 2.3 Gbit/s per lane (vendor kernel:
+ * ap_data_rate 2300 for an MT6382 link); the txdiv 1 range above 2 GHz
+ * exists already. 2.5 GHz is the D-PHY v1.2 limit.
+ */
+static int mtk_mipi_tx_pll_determine_rate_mt6785(struct clk_hw *hw,
+						 struct clk_rate_request *req)
+{
+	req->rate = clamp_val(req->rate, 125000000, 2500000000UL);
+
+	return 0;
+}
+
+static const struct clk_ops mtk_mipi_tx_pll_ops_mt6785 = {
+	.enable = mtk_mipi_tx_pll_enable,
+	.disable = mtk_mipi_tx_pll_disable,
+	.determine_rate = mtk_mipi_tx_pll_determine_rate_mt6785,
+	.set_rate = mtk_mipi_tx_pll_set_rate,
+	.recalc_rate = mtk_mipi_tx_pll_recalc_rate,
+};
+
+/*
+ * The bootloader left the PLL running: remember PCW and post divider, and
+ * read back the impedance calibration and LDO reference it programmed, so
+ * that a later full power-on reproduces them instead of the defaults.
+ */
+static void mtk_mipi_tx_read_boot_state(struct mtk_mipi_tx *mipi_tx)
+{
+	void __iomem *base = mipi_tx->regs;
+	static const unsigned int txdivs[] = { 1, 2, 4, 8, 16 };
+	u32 con1 = readl(base + MIPITX_PLL_CON1);
+	u32 sel;
+	int i, j;
+
+	if (!(con1 & RG_DSI_PLL_EN)) {
+		dev_info(mipi_tx->dev, "boot state: PLL off\n");
+		return;
+	}
+
+	mipi_tx->boot_pcw = readl(base + MIPITX_PLL_CON0);
+	mipi_tx->boot_posdiv = FIELD_GET(RG_DSI_PLL_POSDIV, con1);
+	if (mipi_tx->boot_posdiv >= ARRAY_SIZE(txdivs))
+		return;
+
+	for (i = 0; i < 5; i++) {
+		mipi_tx->rt_code[i] = 0;
+		for (j = 0; j < 10; j++)
+			mipi_tx->rt_code[i] |= (readl(base + MIPITX_D2P_RTCODE * (i + 1) +
+						      j * 4) & 1) << j;
+	}
+	sel = FIELD_GET(RG_DSI_HSTX_LDO_REF_SEL, readl(base + MIPITX_VOLTAGE_SEL));
+	mipi_tx->mipitx_drive = 3000 + 200 * sel;
+
+	mipi_tx->data_rate = div_u64((u64)mipi_tx->boot_pcw * 26000000,
+				     txdivs[mipi_tx->boot_posdiv]) >> 24;
+	mipi_tx->boot_pll_on = true;
+	mipi_tx->boot_signal_on = true;
+
+	dev_info(mipi_tx->dev,
+		 "boot state: PLL on, PCW 0x%08x posdiv %u (%u bit/s), drive %u uA, rt codes %03x %03x %03x %03x %03x\n",
+		 mipi_tx->boot_pcw, mipi_tx->boot_posdiv, mipi_tx->data_rate,
+		 mipi_tx->mipitx_drive, mipi_tx->rt_code[0], mipi_tx->rt_code[1],
+		 mipi_tx->rt_code[2], mipi_tx->rt_code[3], mipi_tx->rt_code[4]);
+}
 
 static void mtk_mipi_tx_config_calibration_data(struct mtk_mipi_tx *mipi_tx)
 {
@@ -176,4 +261,11 @@ const struct mtk_mipitx_data mt8183_mipitx_data = {
 	.mipi_tx_clk_ops = &mtk_mipi_tx_pll_ops,
 	.mipi_tx_enable_signal = mtk_mipi_tx_power_on_signal,
 	.mipi_tx_disable_signal = mtk_mipi_tx_power_off_signal,
+};
+
+const struct mtk_mipitx_data mt6785_mipitx_data = {
+	.mipi_tx_clk_ops = &mtk_mipi_tx_pll_ops_mt6785,
+	.mipi_tx_enable_signal = mtk_mipi_tx_power_on_signal,
+	.mipi_tx_disable_signal = mtk_mipi_tx_power_off_signal,
+	.mipi_tx_read_boot_state = mtk_mipi_tx_read_boot_state,
 };
