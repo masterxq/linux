@@ -16,11 +16,15 @@
 #include <linux/phy/phy.h>
 #include <linux/slab.h>
 
+struct mtk_mipi_tx;
+
 struct mtk_mipitx_data {
 	const u32 mppll_preserve;
 	const struct clk_ops *mipi_tx_clk_ops;
 	void (*mipi_tx_enable_signal)(struct phy *phy);
 	void (*mipi_tx_disable_signal)(struct phy *phy);
+	/* optional: capture a PLL the bootloader left running */
+	void (*mipi_tx_read_boot_state)(struct mtk_mipi_tx *mipi_tx);
 };
 
 struct mtk_mipi_tx {
@@ -29,6 +33,11 @@ struct mtk_mipi_tx {
 	u32 data_rate;
 	u32 mipitx_drive;
 	u32 rt_code[5];
+	/* PLL and lanes still as the bootloader left them, see "mediatek,inherit-boot-state" */
+	bool boot_pll_on;
+	bool boot_signal_on;
+	u32 boot_pcw;
+	u32 boot_posdiv;
 	const struct mtk_mipitx_data *driver_data;
 	struct clk_hw pll_hw;
 };
@@ -43,4 +52,6 @@ extern const struct mtk_mipitx_data mt2701_mipitx_data;
 extern const struct mtk_mipitx_data mt8173_mipitx_data;
 extern const struct mtk_mipitx_data mt8183_mipitx_data;
 extern const struct mtk_mipitx_data mt8196_mipitx_data;
+extern const struct mtk_mipitx_data mt6785_mipitx_data;
+
 #endif
