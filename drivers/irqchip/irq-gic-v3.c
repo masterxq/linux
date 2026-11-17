@@ -14,6 +14,7 @@
 #include <linux/irqdomain.h>
 #include <linux/kernel.h>
 #include <linux/kstrtox.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
@@ -1422,9 +1423,21 @@ static void __init gic_smp_init(void)
 	set_smp_ipi_range(base_sgi, 8);
 }
 
+/*
+ * 1 of N SPI routing: the MT6785 power controller wakes a powered
+ * down CPU for an SPI that is routed to "any" CPU, but not for one targeted
+ * at that CPU, which then waits for the CPU's next timer or IPI. The vendor
+ * kernel routes every SPI to any CPU (CONFIG_MTK_GIC_TARGET_ALL). With this
+ * parameter set, an SPI whose affinity covers all online CPUs is routed the
+ * same way. A new value applies to affinities set afterwards.
+ */
+static bool gic_spi_1ofn;
+module_param_named(spi_1ofn, gic_spi_1ofn, bool, 0644);
+
 static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 			    bool force)
 {
+	const struct cpumask *effective;
 	unsigned int cpu;
 	u32 offset, index;
 	void __iomem *reg;
@@ -1442,6 +1455,15 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	if (gic_irq_in_rdist(d))
 		return -EINVAL;
 
+	if (READ_ONCE(gic_spi_1ofn) && !force &&
+	    cpumask_subset(cpu_online_mask, mask_val)) {
+		val = GICD_IROUTER_SPI_MODE_ANY;
+		effective = cpu_online_mask;
+	} else {
+		val = gic_cpu_to_affinity(cpu);
+		effective = cpumask_of(cpu);
+	}
+
 	/* If interrupt was enabled, disable it first */
 	enabled = gic_peek_irq(d, GICD_ISENABLER);
 	if (enabled)
@@ -1449,7 +1471,6 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 
 	offset = convert_offset_index(d, GICD_IROUTER, &index);
 	reg = gic_dist_base(d) + offset + (index * 8);
-	val = gic_cpu_to_affinity(cpu);
 
 	gic_write_irouter(val, reg);
 
@@ -1460,7 +1481,7 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	if (enabled)
 		gic_unmask_irq(d);
 
-	irq_data_update_effective_affinity(d, cpumask_of(cpu));
+	irq_data_update_effective_affinity(d, effective);
 
 	return IRQ_SET_MASK_OK_DONE;
 }
