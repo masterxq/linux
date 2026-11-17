@@ -13,9 +13,11 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
+#include <linux/sysfs.h>
 
 #define PWRAP_POLL_DELAY_US	10
 #define PWRAP_POLL_TIMEOUT_US	10000
+#define PWRAP_POLL_SPIN_US	20
 
 #define PWRAP_MT8135_BRIDGE_IORD_ARB_EN		0x4
 #define PWRAP_MT8135_BRIDGE_WACS3_EN		0x10
@@ -1445,14 +1447,59 @@ static bool pwrap_is_fsm_idle_and_sync_idle(struct pmic_wrapper *wrp)
 		(val & PWRAP_STATE_SYNC_IDLE0);
 }
 
+/*
+ * A WACS2 transaction usually completes within a few microseconds, well
+ * below what usleep_range() can sleep: the sleeping poll alone turns every
+ * PMIC read into 20..60 us. Busy-wait for a short while first and only
+ * sleep if the wrapper is still busy after that.
+ */
+/*
+ * spin_us: busy-wait time before sleeping, 0 = the sleeping poll only. spin_stats: waits that ended
+ * while spinning / that had to sleep afterwards.
+ */
+static unsigned int spin_us = PWRAP_POLL_SPIN_US;
+module_param(spin_us, uint, 0644);
+MODULE_PARM_DESC(spin_us, "busy-wait before sleeping on the WACS2 FSM, us (0..100)");
+static atomic_long_t pwrap_spin_hit, pwrap_spin_miss;
+
+static int pwrap_spin_stats_get(char *buf, const struct kernel_param *kp)
+{
+	return sysfs_emit(buf, "hit=%ld miss=%ld\n", atomic_long_read(&pwrap_spin_hit),
+			  atomic_long_read(&pwrap_spin_miss));
+}
+
+static const struct kernel_param_ops pwrap_spin_stats_ops = {
+	.get = pwrap_spin_stats_get,
+};
+module_param_cb(spin_stats, &pwrap_spin_stats_ops, NULL, 0444);
+MODULE_PARM_DESC(spin_stats, "waits ended while spinning / that slept afterwards");
+
+static int pwrap_wait_for(struct pmic_wrapper *wrp,
+			  bool (*fn)(struct pmic_wrapper *wrp))
+{
+	unsigned int spin = min(READ_ONCE(spin_us), 100U);
+	bool tmp;
+	int ret;
+
+	if (spin) {
+		ret = readx_poll_timeout_atomic(fn, wrp, tmp, tmp, 1, spin);
+		if (!ret) {
+			atomic_long_inc(&pwrap_spin_hit);
+			return 0;
+		}
+		atomic_long_inc(&pwrap_spin_miss);
+	}
+
+	return readx_poll_timeout(fn, wrp, tmp, tmp, PWRAP_POLL_DELAY_US,
+				  PWRAP_POLL_TIMEOUT_US);
+}
+
 static int pwrap_read16(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 {
-	bool tmp;
 	int ret;
 	u32 val;
 
-	ret = readx_poll_timeout(pwrap_is_fsm_idle, wrp, tmp, tmp,
-				 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
+	ret = pwrap_wait_for(wrp, pwrap_is_fsm_idle);
 	if (ret) {
 		pwrap_leave_fsm_vldclr(wrp);
 		return ret;
@@ -1464,8 +1511,7 @@ static int pwrap_read16(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 		val = (adr >> 1) << 16;
 	pwrap_writel(wrp, val, PWRAP_WACS2_CMD);
 
-	ret = readx_poll_timeout(pwrap_is_fsm_vldclr, wrp, tmp, tmp,
-				 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
+	ret = pwrap_wait_for(wrp, pwrap_is_fsm_vldclr);
 	if (ret)
 		return ret;
 
@@ -1482,13 +1528,11 @@ static int pwrap_read16(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 
 static int pwrap_read32(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 {
-	bool tmp;
 	int ret, msb;
 
 	*rdata = 0;
 	for (msb = 0; msb < 2; msb++) {
-		ret = readx_poll_timeout(pwrap_is_fsm_idle, wrp, tmp, tmp,
-					 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
+		ret = pwrap_wait_for(wrp, pwrap_is_fsm_idle);
 
 		if (ret) {
 			pwrap_leave_fsm_vldclr(wrp);
@@ -1498,8 +1542,7 @@ static int pwrap_read32(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 		pwrap_writel(wrp, ((msb << 30) | (adr << 16)),
 			     PWRAP_WACS2_CMD);
 
-		ret = readx_poll_timeout(pwrap_is_fsm_vldclr, wrp, tmp, tmp,
-					 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
+		ret = pwrap_wait_for(wrp, pwrap_is_fsm_vldclr);
 		if (ret)
 			return ret;
 
@@ -1519,11 +1562,9 @@ static int pwrap_read(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 
 static int pwrap_write16(struct pmic_wrapper *wrp, u32 adr, u32 wdata)
 {
-	bool tmp;
 	int ret;
 
-	ret = readx_poll_timeout(pwrap_is_fsm_idle, wrp, tmp, tmp,
-				 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
+	ret = pwrap_wait_for(wrp, pwrap_is_fsm_idle);
 	if (ret) {
 		pwrap_leave_fsm_vldclr(wrp);
 		return ret;
@@ -1542,12 +1583,10 @@ static int pwrap_write16(struct pmic_wrapper *wrp, u32 adr, u32 wdata)
 
 static int pwrap_write32(struct pmic_wrapper *wrp, u32 adr, u32 wdata)
 {
-	bool tmp;
 	int ret, msb, rdata;
 
 	for (msb = 0; msb < 2; msb++) {
-		ret = readx_poll_timeout(pwrap_is_fsm_idle, wrp, tmp, tmp,
-					 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
+		ret = pwrap_wait_for(wrp, pwrap_is_fsm_idle);
 		if (ret) {
 			pwrap_leave_fsm_vldclr(wrp);
 			return ret;
