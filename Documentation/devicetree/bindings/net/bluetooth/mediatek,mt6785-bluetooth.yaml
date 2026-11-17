@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/bluetooth/mediatek,mt6785-bluetooth.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 CONNAC1 Bluetooth
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  Bluetooth function of the MT6785 connectivity subsystem ("soc1_0"). It has no registers
+  of its own: HCI packets travel over the BTIF/STP link of the consys node referenced with
+  mediatek,consys, which also powers the subsystem and switches the function on and off.
+
+allOf:
+  - $ref: /schemas/net/bluetooth/bluetooth-controller.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6785-bluetooth
+
+  mediatek,consys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The connectivity subsystem (mediatek,mt6785-consys) that carries this function.
+
+required:
+  - compatible
+  - mediatek,consys
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    bluetooth {
+        compatible = "mediatek,mt6785-bluetooth";
+        mediatek,consys = <&consys>;
+    };

@@ -1,0 +1,208 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6785-consys.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 CONNAC1 connectivity subsystem (consys)
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  The integrated connectivity subsystem ("soc1_0") of the MT6785 combines the CONN MCU,
+  the WLAN/BT/GPS/FM digital part and the interface to the external RF die (MT6631).
+  This node describes what is needed to power it and to place the RAM patches into
+  its EMI region. The CONN MTCMOS is switched by the driver itself through the
+  SCPSYS and INFRACFG syscons (power control and bus protection), not through a
+  power-domains reference: the platform bus would switch a single power domain on
+  before probe, while the CONN MCU is not yet held in reset and the EMI remap still
+  has its reset value.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-consys
+
+  reg:
+    minItems: 8
+    items:
+      - description: CONN_MCU_CFG (HW/FW version, boot status)
+      - description: CONN_HIF_PDMA (sleep protection control)
+      - description: CONN_HIF_ON (MCU program counter)
+      - description: CONN_MCU_TOP_MISC_OFF (IP version, configuration id)
+      - description: CONN_AFE (WBG PLL)
+      - description: CONN_TOP_MISC_ON (co-clock, toppose restore)
+      - description: AP_PCCIF4 (CCIF ACK status)
+      - description: BTIF (AP side of the STP/WMT link)
+      - description: AP DMA channel of the BTIF TX direction (optional, the BTIF also works in PIO mode)
+      - description: AP DMA channel of the BTIF RX direction (optional, the BTIF also works in PIO mode)
+
+  reg-names:
+    minItems: 8
+    items:
+      - const: mcu-cfg
+      - const: hif-pdma
+      - const: hif-on
+      - const: top-misc-off
+      - const: afe
+      - const: top-misc-on
+      - const: pccif4
+      - const: btif
+      - const: btif-tx-dma
+      - const: btif-rx-dma
+
+  interrupts:
+    minItems: 1
+    items:
+      - description: BTIF RX
+      - description: AP DMA BTIF TX channel
+      - description: AP DMA BTIF RX channel
+
+  interrupt-names:
+    minItems: 1
+    items:
+      - const: btif
+      - const: btif-tx-dma
+      - const: btif-rx-dma
+
+  clocks:
+    minItems: 2
+    items:
+      - description: INFRA CCIF4_AP gate
+      - description: INFRA BTIF gate
+      - description: INFRA AP_DMA gate (with the BTIF TX DMA channel)
+
+  clock-names:
+    minItems: 2
+    items:
+      - const: ccif
+      - const: btif
+      - const: apdma
+
+  resets:
+    items:
+      - description: TOPRGU CONN MCU software reset
+
+  reset-names:
+    items:
+      - const: mcu
+
+  power-domains:
+    maxItems: 1
+    description:
+      The CONN power domain. The driver powers it with runtime PM at its point in the power-on
+      sequence (after the A-die supplies, the CONN MCU reset and the CCIF clock), never at
+      probe.
+
+  mediatek,scpsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      SCPSYS (SPM) syscon with CONN_PWR_CON and the power status registers. Only read when
+      power-domains is present; without it the driver switches the CONN MTCMOS through it.
+
+  mediatek,infracfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: INFRACFG_AO syscon (EMI and PERI remap for the CONN bus).
+
+  mediatek,pericfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: PERICFG syscon (CON_STA register).
+
+  memory-region:
+    maxItems: 1
+    description: Reserved, unmapped EMI region of the subsystem (4 MiB, 64 KiB aligned).
+
+  vcn18-supply:
+    description: VCN18, 1.8 V.
+
+  vcn33-1-supply:
+    description: VCN33_1 (WIFI enable), 3.3 V.
+
+  vcn33-2-supply:
+    description: VCN33_2 (WIFI enable), 2.8 V, efuse/FM/GPS in co-clock mode.
+
+  pinctrl-names:
+    items:
+      - const: "on"
+      - const: "off"
+
+  mediatek,co-clock:
+    type: boolean
+    description: The RF die shares the 26 MHz crystal with the SoC (co-clock mode).
+
+anyOf:
+  - required:
+      - power-domains
+  - required:
+      - mediatek,scpsys
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - mediatek,infracfg
+  - mediatek,pericfg
+  - memory-region
+  - vcn18-supply
+  - vcn33-1-supply
+  - vcn33-2-supply
+  - pinctrl-names
+  - pinctrl-0
+  - pinctrl-1
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/power/mediatek,mt6785-power.h>
+    #include <dt-bindings/reset/mediatek,mt6785-resets.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        connectivity@18002000 {
+            compatible = "mediatek,mt6785-consys";
+            reg = <0 0x18002000 0 0x1000>,
+                  <0 0x18004000 0 0x1000>,
+                  <0 0x18007000 0 0x1000>,
+                  <0 0x180b1000 0 0x1000>,
+                  <0 0x180b3000 0 0x1000>,
+                  <0 0x180c1000 0 0x1000>,
+                  <0 0x1024c000 0 0x40>,
+                  <0 0x1100c000 0 0x1000>,
+                  <0 0x11000b80 0 0x80>,
+                  <0 0x11000c00 0 0x80>;
+            reg-names = "mcu-cfg", "hif-pdma", "hif-on", "top-misc-off",
+                        "afe", "top-misc-on", "pccif4", "btif", "btif-tx-dma", "btif-rx-dma";
+            interrupts = <GIC_SPI 138 IRQ_TYPE_LEVEL_LOW>,
+                         <GIC_SPI 155 IRQ_TYPE_LEVEL_LOW>,
+                         <GIC_SPI 154 IRQ_TYPE_LEVEL_LOW>;
+            interrupt-names = "btif", "btif-tx-dma", "btif-rx-dma";
+            clocks = <&infracfg CLK_INFRA_CCIF4_AP>, <&infracfg CLK_INFRA_BTIF>,
+                     <&infracfg CLK_INFRA_AP_DMA>;
+            clock-names = "ccif", "btif", "apdma";
+            resets = <&watchdog MT6785_TOPRGU_CONN_MCU_RST>;
+            reset-names = "mcu";
+            power-domains = <&spm MT6785_POWER_DOMAIN_CONN>;
+            mediatek,scpsys = <&scpsys>;
+            mediatek,infracfg = <&infracfg>;
+            mediatek,pericfg = <&pericfg>;
+            memory-region = <&consys_emi>;
+            vcn18-supply = <&vcn18>;
+            vcn33-1-supply = <&vcn33_1_wifi>;
+            vcn33-2-supply = <&vcn33_2_wifi>;
+            pinctrl-names = "on", "off";
+            pinctrl-0 = <&consys_pins_on>;
+            pinctrl-1 = <&consys_pins_off>;
+            mediatek,co-clock;
+        };
+    };
