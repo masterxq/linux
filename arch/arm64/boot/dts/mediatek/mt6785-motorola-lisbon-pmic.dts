@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with the MT6359 PMIC on pwrap: VUSB supply, vibration motor, RTC and
+ * "reboot bootloader" through the RTC spare bit.
+ * PMIC interrupt on EINT 193, level high.
+ * The vibration motor on the MT6359 LDO VIBR is exposed as a regulator-output (userspace-consumer).
+ */
+
+/dts-v1/;
+
+#include "mt6785-motorola-lisbon-common.dtsi"
+#include "mt6359.dtsi"
+
+/ {
+	model = "Motorola Moto G60s (lisbon)";
+	compatible = "motorola,lisbon", "mediatek,mt6785";
+
+	chosen {
+		/*
+		 * The bootloader splits its framebuffer reservation (0x78230000) into pages of 1088
+		 * x 2464 pixels (4 bytes) and scans out page 1: 0x78230000 + 1088 * 2464 * 4 =
+		 * 0x78c6a000. Within the page the lines are only 1080 px = 4320 bytes long (no
+		 * padding to 1088), 2460 lines are visible.
+		 */
+		framebuffer0: framebuffer@78c6a000 {
+			compatible = "simple-framebuffer";
+			reg = <0 0x78c6a000 0 (4320 * 2460)>;
+			width = <1080>;
+			height = <2460>;
+			stride = <4320>;
+			format = "a8r8g8b8";
+			status = "okay";
+		};
+	};
+
+	vibrator {
+		compatible = "regulator-output";
+		vout-supply = <&mt6359_vibr_ldo_reg>;
+	};
+};
+
+&pwrap {
+	status = "okay";
+};
+
+/*
+ * No keys node here: mtk_pmic_keys_lp_reset_setup() always writes the long-press reset register at
+ * probe (reset off without "mediatek,long-press-mode"). For MT6359 the driver also uses address
+ * 0x14c and bits 6/9:8, while TOP_RST_MISC is at 0x14a (0x14c is its _SET register) with
+ * PWRKEY_RST_EN at bit 9 and RST_TD at bits 13:12. This would disable the 10 s long-press reset.
+ */
+&pmic {
+	interrupts-extended = <&pio 193 IRQ_TYPE_LEVEL_HIGH>;
+};
+
+/*
+ * vib_vol 9 = 2.8 V in the MT6359 VIBR table; fixed so the regulator core does not pick a voltage
+ */
+&mt6359_vibr_ldo_reg {
+	regulator-min-microvolt = <2800000>;
+	regulator-max-microvolt = <2800000>;
+};
+
+&ssusb {
+	vusb33-supply = <&mt6359_vusb_ldo_reg>;
+};
+
+/*
+ * "reboot bootloader": set RTC_PDN1 bit 13 like the vendor kernel; the bootloader checks the bit on
+ * the next boot, clears it and enters fastboot. No mode-recovery (0x10): it is not known whether
+ * the bootloader clears the recovery bits itself (risk of a recovery loop).
+ */
+&mt6359rtc {
+	mode-bootloader = <0x2000>;
+	/* The bootloader and the vendor kernel count the year register from 1968. */
+	mediatek,year-base-1968;
+};

@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with internal storage (UFS 11270000.ufshci + M-PHY 11fa0000) on top
+ * of the PMIC description.
+ *
+ * Based on mt6785-xiaomi-begonia-common.dtsi (&ufshci/&ufsphy); vcc = VEMC, vccq2 = VUFS.
+ * Differences from begonia:
+ *  - no "mediatek,ufs-support-va09": the driver then neither calls the VA09_PWR_CTRL SiP service
+ *    nor switches VA09, which stays on as enabled by the bootloader. The vendor kernel does not use
+ *    VA09 control on this board either.
+ *  - VEMC/VUFS/VA09 regulator-always-on: the boot storage is never powered off (voltages stay as
+ *    set by the bootloader).
+ */
+
+#include "mt6785-motorola-lisbon-pmic.dts"
+
+&mt6359_vemc_ldo_reg {
+	regulator-always-on;
+};
+
+&mt6359_vufs_ldo_reg {
+	regulator-always-on;
+};
+
+&mt6359_va09_ldo_reg {
+	regulator-always-on;
+};
+
+&ufshci {
+	mediatek,ufs-disable-mcq;
+
+	vcc-supply = <&mt6359_vemc_ldo_reg>;
+	vccq2-supply = <&mt6359_vufs_ldo_reg>;
+
+	status = "okay";
+};
+
+&ufsphy {
+	status = "okay";
+};

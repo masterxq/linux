@@ -1,0 +1,424 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon), common board description.
+ *
+ * The lk-dtbo-sink node and the __symbols__ give the dtbo overlay applied by the bootloader valid
+ * targets without modifying real nodes.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+#include "mt6785.dtsi"
+
+/ {
+	chassis-type = "handset";
+
+	/* Labelled so that dtc assigns a phandle: the bootloader overlay targets /chosen. */
+	lkdtbo_chosen: chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* The bootloader expects chosen/bootargs to exist and appends its own arguments. */
+		bootargs = "";
+	};
+
+	/* Placeholder; the bootloader fills in the actual DRAM ranges. */
+	memory {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0x3e605000>;
+	};
+
+	/*
+	 * Left empty: the bootloader adds its own reservations here (framebuffer at 0x78230000,
+	 * pstore at 0x4d010000, ...) and rejects fixed entries that overlap them.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	/*
+	 * pstore/ramoops in the region reserved by the bootloader. The layout matches the one of
+	 * the vendor kernel (dump 0x4f000 | console 0x40000 | bconsole 0x40000 | ftrace 0x1000 |
+	 * pmsg 0x10000), so records survive a warm reboot into either kernel:
+	 *   dmesg 0x8f000 (0x1000 records at the same addresses as the vendor dump),
+	 *   console at 0x4d09f000 (vendor "bconsole"),
+	 *   ftrace at 0x4d0df000, pmsg at 0x4d0e0000 (vendor pmsg).
+	 * Not placed under reserved-memory, the bootloader reserves the region.
+	 */
+	ramoops@4d010000 {
+		compatible = "ramoops";
+		reg = <0 0x4d010000 0 0xe0000>;
+		record-size = <0x1000>;
+		console-size = <0x40000>;
+		ftrace-size = <0x1000>;
+		pmsg-size = <0x10000>;
+		ecc-size = <0>;
+	};
+
+	/*
+	 * The bootloader reads the SCP status and SRAM size from this node. No mainline driver
+	 * binds to "mediatek,scp".
+	 */
+	scp@10500000 {
+		compatible = "mediatek,scp";
+		reg = <0 0x10500000 0 0xc0000>,
+		      <0 0x105c0000 0 0x3000>,
+		      <0 0x105c4000 0 0x1000>,
+		      <0 0x105d4000 0 0x6000>;
+		core_1 = "enable";
+		scp_sramSize = <0xc0000>;
+		status = "okay";
+	};
+
+	/* VUSB (MT6359) as left enabled by the bootloader. */
+	vusb33_lk: regulator-vusb33-lk {
+		compatible = "regulator-fixed";
+		regulator-name = "vusb33-lk";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	lk_dtbo_sink: lk-dtbo-sink {
+		status = "disabled";
+		lk-dtbo-targets = <&lkdtbo_chosen>,
+				  <&lkdtbo_accdet>,
+				  <&lkdtbo_afe>,
+				  <&lkdtbo_auxadc>,
+				  <&lkdtbo_bat_gm30>,
+				  <&lkdtbo_charger>,
+				  <&lkdtbo_consys>,
+				  <&lkdtbo_dsi_te>,
+				  <&lkdtbo_flashlights_mt6360>,
+				  <&lkdtbo_goodix_fp>,
+				  <&lkdtbo_gpio>,
+				  <&lkdtbo_gpio_usage_mapping>,
+				  <&lkdtbo_i2c0>,
+				  <&lkdtbo_i2c1>,
+				  <&lkdtbo_i2c2>,
+				  <&lkdtbo_i2c3>,
+				  <&lkdtbo_i2c4>,
+				  <&lkdtbo_i2c5>,
+				  <&lkdtbo_i2c6>,
+				  <&lkdtbo_i2c7>,
+				  <&lkdtbo_i2c8>,
+				  <&lkdtbo_i2c9>,
+				  <&lkdtbo_kd_camera_hw1>,
+				  <&lkdtbo_keypad>,
+				  <&lkdtbo_lk_charger>,
+				  <&lkdtbo_main_pmic>,
+				  <&lkdtbo_md1_sim1_hot_plug_eint>,
+				  <&lkdtbo_md_auxadc>,
+				  <&lkdtbo_moto_chg_tcmd>,
+				  <&lkdtbo_mrdump_ext_rst>,
+				  <&lkdtbo_msdc1>,
+				  <&lkdtbo_msdc1_ins>,
+				  <&lkdtbo_mt6359_snd>,
+				  <&lkdtbo_mt6360_ldo>,
+				  <&lkdtbo_mt6360_pmu>,
+				  <&lkdtbo_mt6360_typec>,
+				  <&lkdtbo_mt6382_nfc>,
+				  <&lkdtbo_mtkfb>,
+				  <&lkdtbo_mt_pmic_vcamio_ldo_reg>,
+				  <&lkdtbo_mt_pmic_vfp_ldo_reg>,
+				  <&lkdtbo_mt_pmic_vio18_ldo_reg>,
+				  <&lkdtbo_mt_pmic_vio28_ldo_reg>,
+				  <&lkdtbo_mt_pmic_vtp_ldo_reg>,
+				  <&lkdtbo_odm>,
+				  <&lkdtbo_pio>,
+				  <&lkdtbo_pmic_clock_buffer_ctrl>,
+				  <&lkdtbo_reserved_memory>,
+				  <&lkdtbo_smart_pa>,
+				  <&lkdtbo_snd_audio_dsp>,
+				  <&lkdtbo_sound>,
+				  <&lkdtbo_spi0>,
+				  <&lkdtbo_spi1>,
+				  <&lkdtbo_spi3>,
+				  <&lkdtbo_subpmic_pmu_eint>,
+				  <&lkdtbo_swtp>,
+				  <&lkdtbo_tcpc_pd>,
+				  <&lkdtbo_touch>;
+
+		lkdtbo_accdet: accdet {
+		};
+
+		lkdtbo_afe: afe {
+		};
+
+		lkdtbo_auxadc: auxadc {
+		};
+
+		lkdtbo_bat_gm30: bat-gm30 {
+		};
+
+		lkdtbo_charger: charger {
+		};
+
+		lkdtbo_consys: consys {
+		};
+
+		lkdtbo_dsi_te: dsi-te {
+		};
+
+		lkdtbo_flashlights_mt6360: flashlights-mt6360 {
+		};
+
+		lkdtbo_goodix_fp: goodix-fp {
+		};
+
+		lkdtbo_gpio: gpio {
+		};
+
+		lkdtbo_gpio_usage_mapping: gpio-usage-mapping {
+		};
+
+		lkdtbo_i2c0: i2c0 {
+		};
+
+		lkdtbo_i2c1: i2c1 {
+		};
+
+		lkdtbo_i2c2: i2c2 {
+		};
+
+		lkdtbo_i2c3: i2c3 {
+		};
+
+		lkdtbo_i2c4: i2c4 {
+		};
+
+		lkdtbo_i2c5: i2c5 {
+		};
+
+		lkdtbo_i2c6: i2c6 {
+		};
+
+		lkdtbo_i2c7: i2c7 {
+		};
+
+		lkdtbo_i2c8: i2c8 {
+		};
+
+		lkdtbo_i2c9: i2c9 {
+		};
+
+		lkdtbo_kd_camera_hw1: kd-camera-hw1 {
+		};
+
+		lkdtbo_keypad: keypad {
+		};
+
+		lkdtbo_lk_charger: lk-charger {
+		};
+
+		lkdtbo_main_pmic: main-pmic {
+		};
+
+		lkdtbo_md1_sim1_hot_plug_eint: md1-sim1-hot-plug-eint {
+		};
+
+		lkdtbo_md_auxadc: md-auxadc {
+		};
+
+		lkdtbo_moto_chg_tcmd: moto-chg-tcmd {
+		};
+
+		lkdtbo_mrdump_ext_rst: mrdump-ext-rst {
+		};
+
+		lkdtbo_msdc1: msdc1 {
+		};
+
+		lkdtbo_msdc1_ins: msdc1-ins {
+		};
+
+		lkdtbo_mt6359_snd: mt6359-snd {
+		};
+
+		lkdtbo_mt6360_ldo: mt6360-ldo {
+		};
+
+		lkdtbo_mt6360_pmu: mt6360-pmu {
+		};
+
+		lkdtbo_mt6360_typec: mt6360-typec {
+		};
+
+		lkdtbo_mt6382_nfc: mt6382-nfc {
+		};
+
+		lkdtbo_mtkfb: mtkfb {
+		};
+
+		lkdtbo_mt_pmic_vcamio_ldo_reg: mt-pmic-vcamio-ldo-reg {
+		};
+
+		lkdtbo_mt_pmic_vfp_ldo_reg: mt-pmic-vfp-ldo-reg {
+		};
+
+		lkdtbo_mt_pmic_vio18_ldo_reg: mt-pmic-vio18-ldo-reg {
+		};
+
+		lkdtbo_mt_pmic_vio28_ldo_reg: mt-pmic-vio28-ldo-reg {
+		};
+
+		lkdtbo_mt_pmic_vtp_ldo_reg: mt-pmic-vtp-ldo-reg {
+		};
+
+		lkdtbo_odm: odm {
+		};
+
+		lkdtbo_pio: pio {
+		};
+
+		lkdtbo_pmic_clock_buffer_ctrl: pmic-clock-buffer-ctrl {
+		};
+
+		lkdtbo_reserved_memory: reserved-memory {
+		};
+
+		lkdtbo_smart_pa: smart-pa {
+		};
+
+		lkdtbo_snd_audio_dsp: snd-audio-dsp {
+		};
+
+		lkdtbo_sound: sound {
+		};
+
+		lkdtbo_spi0: spi0 {
+		};
+
+		lkdtbo_spi1: spi1 {
+		};
+
+		lkdtbo_spi3: spi3 {
+		};
+
+		lkdtbo_subpmic_pmu_eint: subpmic-pmu-eint {
+		};
+
+		lkdtbo_swtp: swtp {
+		};
+
+		lkdtbo_tcpc_pd: tcpc-pd {
+		};
+
+		lkdtbo_touch: touch {
+		};
+
+	};
+
+	__symbols__ {
+		chosen = "/chosen";
+		accdet = "/lk-dtbo-sink/accdet";
+		afe = "/lk-dtbo-sink/afe";
+		auxadc = "/lk-dtbo-sink/auxadc";
+		bat_gm30 = "/lk-dtbo-sink/bat-gm30";
+		charger = "/lk-dtbo-sink/charger";
+		consys = "/lk-dtbo-sink/consys";
+		dsi_te = "/lk-dtbo-sink/dsi-te";
+		flashlights_mt6360 = "/lk-dtbo-sink/flashlights-mt6360";
+		goodix_fp = "/lk-dtbo-sink/goodix-fp";
+		gpio = "/lk-dtbo-sink/gpio";
+		gpio_usage_mapping = "/lk-dtbo-sink/gpio-usage-mapping";
+		i2c0 = "/lk-dtbo-sink/i2c0";
+		i2c1 = "/lk-dtbo-sink/i2c1";
+		i2c2 = "/lk-dtbo-sink/i2c2";
+		i2c3 = "/lk-dtbo-sink/i2c3";
+		i2c4 = "/lk-dtbo-sink/i2c4";
+		i2c5 = "/lk-dtbo-sink/i2c5";
+		i2c6 = "/lk-dtbo-sink/i2c6";
+		i2c7 = "/lk-dtbo-sink/i2c7";
+		i2c8 = "/lk-dtbo-sink/i2c8";
+		i2c9 = "/lk-dtbo-sink/i2c9";
+		kd_camera_hw1 = "/lk-dtbo-sink/kd-camera-hw1";
+		keypad = "/lk-dtbo-sink/keypad";
+		lk_charger = "/lk-dtbo-sink/lk-charger";
+		main_pmic = "/lk-dtbo-sink/main-pmic";
+		md1_sim1_hot_plug_eint = "/lk-dtbo-sink/md1-sim1-hot-plug-eint";
+		md_auxadc = "/lk-dtbo-sink/md-auxadc";
+		moto_chg_tcmd = "/lk-dtbo-sink/moto-chg-tcmd";
+		mrdump_ext_rst = "/lk-dtbo-sink/mrdump-ext-rst";
+		msdc1 = "/lk-dtbo-sink/msdc1";
+		msdc1_ins = "/lk-dtbo-sink/msdc1-ins";
+		mt6359_snd = "/lk-dtbo-sink/mt6359-snd";
+		mt6360_ldo = "/lk-dtbo-sink/mt6360-ldo";
+		mt6360_pmu = "/lk-dtbo-sink/mt6360-pmu";
+		mt6360_typec = "/lk-dtbo-sink/mt6360-typec";
+		mt6382_nfc = "/lk-dtbo-sink/mt6382-nfc";
+		mtkfb = "/lk-dtbo-sink/mtkfb";
+		mt_pmic_vcamio_ldo_reg = "/lk-dtbo-sink/mt-pmic-vcamio-ldo-reg";
+		mt_pmic_vfp_ldo_reg = "/lk-dtbo-sink/mt-pmic-vfp-ldo-reg";
+		mt_pmic_vio18_ldo_reg = "/lk-dtbo-sink/mt-pmic-vio18-ldo-reg";
+		mt_pmic_vio28_ldo_reg = "/lk-dtbo-sink/mt-pmic-vio28-ldo-reg";
+		mt_pmic_vtp_ldo_reg = "/lk-dtbo-sink/mt-pmic-vtp-ldo-reg";
+		odm = "/lk-dtbo-sink/odm";
+		pio = "/lk-dtbo-sink/pio";
+		pmic_clock_buffer_ctrl = "/lk-dtbo-sink/pmic-clock-buffer-ctrl";
+		reserved_memory = "/lk-dtbo-sink/reserved-memory";
+		smart_pa = "/lk-dtbo-sink/smart-pa";
+		snd_audio_dsp = "/lk-dtbo-sink/snd-audio-dsp";
+		sound = "/lk-dtbo-sink/sound";
+		spi0 = "/lk-dtbo-sink/spi0";
+		spi1 = "/lk-dtbo-sink/spi1";
+		spi3 = "/lk-dtbo-sink/spi3";
+		subpmic_pmu_eint = "/lk-dtbo-sink/subpmic-pmu-eint";
+		swtp = "/lk-dtbo-sink/swtp";
+		tcpc_pd = "/lk-dtbo-sink/tcpc-pd";
+		touch = "/lk-dtbo-sink/touch";
+	};
+};
+
+/* USB gadget */
+&ssusb {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	/* USB 2.0 only: the USB3 port is disabled (Type-C mux not described) */
+	mediatek,u3p-dis-msk = <0x1>;
+	vusb33-supply = <&vusb33_lk>;
+	status = "okay";
+};
+
+/* Keep the display state set up by the bootloader */
+&cci { status = "disabled"; };
+&spm { status = "disabled"; };		/* no power domains: MM stays as set up by the bootloader */
+&pwrap { status = "disabled"; };	/* PMIC untouched (XO_EXTBUF3, display supplies) */
+&iommu { status = "disabled"; };
+&gce { status = "disabled"; };
+&mfgcfg { status = "disabled"; };
+&mmsys { status = "disabled"; };
+&ovl0 { status = "disabled"; };
+&ovl_2l0 { status = "disabled"; };
+&ovl_2l1 { status = "disabled"; };
+&rdma0 { status = "disabled"; };
+&rdma1 { status = "disabled"; };
+&color0 { status = "disabled"; };
+&ccorr0 { status = "disabled"; };
+&aal0 { status = "disabled"; };
+&gamma0 { status = "disabled"; };
+&dither0 { status = "disabled"; };
+&postmask0 { status = "disabled"; };
+&mutex { status = "disabled"; };
+&dsi0 { status = "disabled"; };
+&mipi_tx0 { status = "disabled"; };
+&smi_common { status = "disabled"; };
+&larb0 { status = "disabled"; };
+&larb1 { status = "disabled"; };
+&larb2 { status = "disabled"; };
+&larb3 { status = "disabled"; };
+&larb5 { status = "disabled"; };
+&larb6 { status = "disabled"; };
+&imgsys { status = "disabled"; };
+&vdecsys { status = "disabled"; };
+&vencsys { status = "disabled"; };
+&camsys { status = "disabled"; };
+&apu_conn { status = "disabled"; };
+&apu_vcore { status = "disabled"; };
+&apu_core0 { status = "disabled"; };
+&apu_core1 { status = "disabled"; };
+&audsys { status = "disabled"; };

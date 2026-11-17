@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): USB gadget and the boot framebuffer (simpledrm) only.
+ *
+ * Framebuffer: set up by the bootloader and reserved by it as no-map (base 0x78230000, 32 bpp, byte
+ * order B,G,R,A = DRM a8r8g8b8 little endian); see chosen for the geometry of the scanned-out page.
+ * No clocks/power-domains: their providers (mmsys, spm) are disabled,
+ * clk_ignore_unused/pd_ignore_unused are passed on the command line instead.
+ */
+
+/dts-v1/;
+
+#include "mt6785-motorola-lisbon-common.dtsi"
+
+/ {
+	model = "Motorola Moto G60s (lisbon)";
+	compatible = "motorola,lisbon", "mediatek,mt6785";
+
+	chosen {
+		/*
+		 * The bootloader splits its framebuffer reservation (0x78230000) into pages of 1088
+		 * x 2464 pixels (4 bytes) and scans out page 1: 0x78230000 + 1088 * 2464 * 4 =
+		 * 0x78c6a000. Within the page the lines are only 1080 px = 4320 bytes long (no
+		 * padding to 1088), 2460 lines are visible.
+		 */
+		framebuffer0: framebuffer@78c6a000 {
+			compatible = "simple-framebuffer";
+			reg = <0 0x78c6a000 0 (4320 * 2460)>;
+			width = <1080>;
+			height = <2460>;
+			stride = <4320>;
+			format = "a8r8g8b8";
+			status = "okay";
+		};
+	};
+};
