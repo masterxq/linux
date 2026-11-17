@@ -129,8 +129,13 @@ static const struct mtk_pmic_regs mt6359_regs = {
 		MTK_PMIC_KEYS_REGS(MT6359_TOPSTATUS,
 				   0x8, MT6359_PSC_TOP_INT_CON0, 0xa,
 				   MTK_PMIC_HOMEKEY_RST),
-	.pmic_rst_reg = MT6359_TOP_RST_MISC,
-	.rst_lprst_mask = MTK_PMIC_RST_DU_MASK,
+	/*
+	 * No long-press reset setup: MT6359_TOP_RST_MISC (0x14c) is the _SET
+	 * register of TOP_RST_MISC (0x14a) in MediaTek's register map, and
+	 * PWRKEY_RST_EN / RST_DU are bit 9 / bits 13:12 there, not the
+	 * MT6397 layout used above. Leave the bootloader setting alone.
+	 */
+	.pmic_rst_reg = 0,
 	.key_release_irq = true,
 };
 
@@ -163,6 +168,11 @@ static void mtk_pmic_keys_lp_reset_setup(struct mtk_pmic_keys *keys,
 	u32 long_press_mode, long_press_debounce;
 	u32 value, mask;
 	int error;
+
+	if (!regs->pmic_rst_reg) {
+		dev_info(keys->dev, "long-press reset left as set up by the bootloader\n");
+		return;
+	}
 
 	kregs_home = &regs->keys_regs[MTK_PMIC_HOMEKEY_INDEX];
 	kregs_pwr = &regs->keys_regs[MTK_PMIC_PWRKEY_INDEX];
@@ -322,6 +332,16 @@ static const struct of_device_id of_mtk_pmic_keys_match_tbl[] = {
 };
 MODULE_DEVICE_TABLE(of, of_mtk_pmic_keys_match_tbl);
 
+/*
+ * hold: do not probe at boot. The device stays unbound until hold is cleared
+ * and the probe is triggered through /sys/bus/platform/drivers_probe, so a
+ * fault in the first probe on a new board (interrupt wiring, key mapping) does
+ * not stop the boot.
+ */
+static bool hold;
+module_param(hold, bool, 0644);
+MODULE_PARM_DESC(hold, "skip probing until cleared, then probe via /sys/bus/platform/drivers_probe");
+
 static int mtk_pmic_keys_probe(struct platform_device *pdev)
 {
 	int error, index = 0;
@@ -335,6 +355,12 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 	struct input_dev *input_dev;
 	const struct of_device_id *of_id =
 		of_match_device(of_mtk_pmic_keys_match_tbl, &pdev->dev);
+
+	if (READ_ONCE(hold)) {
+		dev_info(&pdev->dev, "held (mtk_pmic_keys.hold): echo 0 > /sys/module/mtk_pmic_keys/parameters/hold; echo %s > /sys/bus/platform/drivers_probe\n",
+			 dev_name(&pdev->dev));
+		return -ENODEV;
+	}
 
 	keys = devm_kzalloc(&pdev->dev, sizeof(*keys), GFP_KERNEL);
 	if (!keys)

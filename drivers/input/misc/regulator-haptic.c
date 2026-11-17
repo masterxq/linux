@@ -167,7 +167,12 @@ static int regulator_haptic_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	haptic->regulator = devm_regulator_get_exclusive(&pdev->dev, "haptic");
+	/*
+	 * Shared, not exclusive: the motor supply may have other consumers,
+	 * e.g. a regulator-output. Enable and disable are reference counted;
+	 * the voltage request stays within the constraints of the supply.
+	 */
+	haptic->regulator = devm_regulator_get(&pdev->dev, "haptic");
 	if (IS_ERR(haptic->regulator)) {
 		dev_err(&pdev->dev, "failed to get regulator\n");
 		return PTR_ERR(haptic->regulator);
