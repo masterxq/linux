@@ -26,6 +26,10 @@ properties:
     items:
       - const: PD_IRQB
 
+  vbus-supply:
+    description: VBUS output in source role, such as the OTG boost of the
+      MT6360 charger.
+
   connector:
     type: object
     $ref: ../connector/usb-connector.yaml#
