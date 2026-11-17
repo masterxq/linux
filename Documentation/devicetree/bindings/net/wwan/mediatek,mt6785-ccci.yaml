@@ -1,0 +1,217 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/wwan/mediatek,mt6785-ccci.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 cellular modem (MD1) host interface
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  The MT6785 contains a cellular modem subsystem (MD1, LTE/WCDMA/GSM). The
+  bootloader loads and verifies the modem image, places it in reserved
+  memory and hands the layout over in /chosen (ccci,modem_info_v2); the
+  application processor powers the modem subsystem, sets its boot slave
+  register and talks to it over the cross-core interrupt controller CCIF0
+  (control channel, ring buffers in shared memory). Packet data goes over
+  the data path interface DPMAIF (descriptor rings in application processor
+  memory, one interrupt). This node describes the application processor side
+  of that interface (CCCI). The DPMAIF resources are optional: without them
+  only the control channel is used.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-ccci
+
+  reg:
+    minItems: 5
+    items:
+      - description: CCIF0, application processor side
+      - description: CCIF0, modem side
+      - description: CCIF4, modem side
+      - description: BROM pass flags in the security always-on block
+      - description: Boot slave enable register of the modem
+      - description: DPMAIF uplink, always-on part
+      - description: DPMAIF downlink, always-on part
+      - description: DPMAIF uplink, power-down part
+      - description: DPMAIF downlink, power-down part
+      - description: DPMAIF interrupt and misc control, power-down part
+      - description: DPMAIF modem side misc control
+      - description: DPMAIF internal SRAM (debug)
+  reg-names:
+    minItems: 5
+    items:
+      - const: ap-ccif
+      - const: md-ccif
+      - const: md-ccif4
+      - const: sec-ao
+      - const: md-boot
+      - const: dpmaif-ao-ul
+      - const: dpmaif-ao-dl
+      - const: dpmaif-pd-ul
+      - const: dpmaif-pd-dl
+      - const: dpmaif-pd-misc
+      - const: dpmaif-pd-md-misc
+      - const: dpmaif-sram
+
+  interrupts:
+    minItems: 3
+    items:
+      - description: Modem watchdog
+      - description: CCIF0 data channels
+      - description: CCIF0 control and exception channels
+      - description: DPMAIF
+  interrupt-names:
+    minItems: 3
+    items:
+      - const: mdwdt
+      - const: ccif0-data
+      - const: ccif0-ctrl
+      - const: dpmaif
+
+  clocks:
+    minItems: 7
+    items:
+      - description: CCIF0 AP side
+      - description: CCIF0 MD side
+      - description: CCIF1 AP side
+      - description: CCIF1 MD side
+      - description: CCIF2 AP side
+      - description: CCIF2 MD side
+      - description: CCIF4 MD side
+      - description: DPMAIF
+  clock-names:
+    minItems: 7
+    items:
+      - const: ccif-ap
+      - const: ccif-md
+      - const: ccif1-ap
+      - const: ccif1-md
+      - const: ccif2-ap
+      - const: ccif2-md
+      - const: ccif4-md
+      - const: dpmaif
+
+  resets:
+    minItems: 1
+    maxItems: 3
+  reset-names:
+    minItems: 1
+    items:
+      - const: ccif0
+      - const: dpmaif-ao
+      - const: dpmaif-pd
+
+  mediatek,infracfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: INFRACFG_AO syscon (modem clock request, bus protection).
+
+  mediatek,infracfg-nao:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: INFRACFG_NAO syscon (modem boot status).
+
+  mediatek,scpsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: SCPSYS syscon with the MD1 power control registers.
+
+  mediatek,pwrap:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: PMIC wrapper of the MT6359 (26 MHz buffer low power select).
+
+  vmodem-supply:
+    description: Modem core supply (MT6359 VMODEM).
+
+  vsram-md-supply:
+    description: Modem SRAM supply (MT6359 VSRAM_MD).
+
+  mediatek,swtp-gpios:
+    maxItems: 1
+    description:
+      Transmit power switch input (SWTP, "RF_cable" in the vendor driver).
+      The application processor reports the transmit power state derived
+      from this line to the modem at boot and on every change.
+
+  io-channels:
+    maxItems: 1
+    description: AUXADC channel the modem asks for at boot.
+  io-channel-names:
+    items:
+      - const: md-channel
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - mediatek,infracfg
+  - mediatek,infracfg-nao
+  - mediatek,scpsys
+  - mediatek,pwrap
+  - vmodem-supply
+  - vsram-md-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/reset/mediatek,mt6785-resets.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        modem@10209000 {
+            compatible = "mediatek,mt6785-ccci";
+            reg = <0 0x10209000 0 0x1000>,
+                  <0 0x1020a000 0 0x1000>,
+                  <0 0x1024d000 0 0x1000>,
+                  <0 0x1001a824 0 0x10>,
+                  <0 0x20000024 0 0x4>,
+                  <0 0x10014000 0 0x400>,
+                  <0 0x10014400 0 0x400>,
+                  <0 0x1022d000 0 0x100>,
+                  <0 0x1022d100 0 0x300>,
+                  <0 0x1022d400 0 0x400>,
+                  <0 0x1022c000 0 0x1000>,
+                  <0 0x1022e000 0 0x1000>;
+            reg-names = "ap-ccif", "md-ccif", "md-ccif4", "sec-ao", "md-boot",
+                        "dpmaif-ao-ul", "dpmaif-ao-dl", "dpmaif-pd-ul",
+                        "dpmaif-pd-dl", "dpmaif-pd-misc", "dpmaif-pd-md-misc",
+                        "dpmaif-sram";
+            interrupts = <GIC_SPI 77 IRQ_TYPE_EDGE_FALLING>,
+                         <GIC_SPI 174 IRQ_TYPE_LEVEL_LOW>,
+                         <GIC_SPI 175 IRQ_TYPE_LEVEL_LOW>,
+                         <GIC_SPI 199 IRQ_TYPE_LEVEL_HIGH>;
+            interrupt-names = "mdwdt", "ccif0-data", "ccif0-ctrl", "dpmaif";
+            clocks = <&infracfg CLK_INFRA_CCIF_AP>,
+                     <&infracfg CLK_INFRA_CCIF_MD>,
+                     <&infracfg CLK_INFRA_CCIF1_AP>,
+                     <&infracfg CLK_INFRA_CCIF1_MD>,
+                     <&infracfg CLK_INFRA_CCIF2_AP>,
+                     <&infracfg CLK_INFRA_CCIF2_MD>,
+                     <&infracfg CLK_INFRA_CCIF4_MD>,
+                     <&infracfg CLK_INFRA_DPMAIF>;
+            clock-names = "ccif-ap", "ccif-md", "ccif1-ap", "ccif1-md",
+                          "ccif2-ap", "ccif2-md", "ccif4-md", "dpmaif";
+            resets = <&infracfg MT6785_INFRA_CCIF0_RST>,
+                     <&infracfg MT6785_INFRA_DPMAIF_AO_RST>,
+                     <&infracfg MT6785_INFRA_DPMAIF_PD_RST>;
+            reset-names = "ccif0", "dpmaif-ao", "dpmaif-pd";
+            mediatek,infracfg = <&infracfg>;
+            mediatek,infracfg-nao = <&infracfg_nao>;
+            mediatek,scpsys = <&scpsys>;
+            mediatek,pwrap = <&pwrap>;
+            vmodem-supply = <&vmodem>;
+            vsram-md-supply = <&vsram_md>;
+            mediatek,swtp-gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+        };
+    };
