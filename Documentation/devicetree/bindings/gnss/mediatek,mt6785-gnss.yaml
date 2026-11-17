@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/gnss/mediatek,mt6785-gnss.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 CONNAC1 GNSS
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  GNSS function of the MT6785 connectivity subsystem ("soc1_0"). It has no registers of
+  its own: the data stream of the GNSS DSP travels over the BTIF/STP link of the consys
+  node referenced with mediatek,consys, which also powers the subsystem and switches the
+  function on and off. The positioning engine runs on the application processor.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-gnss
+
+  mediatek,consys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The connectivity subsystem (mediatek,mt6785-consys) that carries this function.
+
+  lna-gpios:
+    maxItems: 1
+    description: Enable of the external low noise amplifier, driven while the receiver runs.
+
+required:
+  - compatible
+  - mediatek,consys
+  - lna-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    gnss {
+        compatible = "mediatek,mt6785-gnss";
+        mediatek,consys = <&consys>;
+        lna-gpios = <&pio 155 GPIO_ACTIVE_HIGH>;
+    };

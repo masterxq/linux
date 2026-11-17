@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/wireless/mediatek,mt6785-wifi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 CONNAC1 WLAN
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  WLAN function of the MT6785 connectivity subsystem ("soc1_0"). The host reaches it over
+  the CONN bus window (WFDMA, host CSR); the subsystem itself is powered and started by the
+  consys node referenced with mediatek,consys. The window overlaps the register ranges of
+  the consys node, the WLAN driver maps it without claiming it.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-wifi
+
+  reg:
+    maxItems: 1
+    description: CONN bus window (1 MiB)
+
+  interrupts:
+    maxItems: 1
+    description: WFDMA interrupt
+
+  memory-region:
+    maxItems: 1
+    description: Reserved shared-dma-pool for the WFDMA rings and buffers (3 MiB).
+
+  mediatek,consys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The connectivity subsystem (mediatek,mt6785-consys) that powers this function.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - memory-region
+  - mediatek,consys
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        wifi@18000000 {
+            compatible = "mediatek,mt6785-wifi";
+            reg = <0 0x18000000 0 0x100000>;
+            interrupts = <GIC_SPI 322 IRQ_TYPE_LEVEL_LOW>;
+            memory-region = <&wifi_mem>;
+            mediatek,consys = <&consys>;
+        };
+    };
