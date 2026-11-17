@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with audio, without the SPM power controller.
+ *
+ * &spm is disabled: the AFE driver refuses to switch the audio MTCMOS itself while the SPM power
+ * controller owns the domain. Without &spm it powers the audio MTCMOS through the SPM and INFRACFG
+ * syscons, with bounded wait times.
+ */
+
+#include "mt6785-motorola-lisbon.dts"
+#include "mt6785-motorola-lisbon-audio.dtsi"
+
+&spm {
+	status = "disabled";
+};
+
+&afe {
+	/delete-property/ power-domains;
+	mediatek,scpsys = <&scpsys>;
+	mediatek,infracfg = <&infracfg>;
+};

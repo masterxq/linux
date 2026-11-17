@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): audio.
+ *
+ *  - AFE at 0x11210000, GIC SPI 184.
+ *  - AFE pins: GPIO189/190 AUD_CLK/SYNC_MOSI, GPIO191/192 AUD_DAT_MOSI0/1, GPIO193/194
+ *    AUD_DAT_MISO0/1, GPIO143 AUD_DAT_MOSI2, GPIO146 AUD_DAT_MISO2; "off" is GPIO input with
+ *    pull-down, "on" is function 1 with Schmitt trigger and no pull.
+ *  - Microphones: main microphone on AIN0 (PGA L), secondary microphone on AIN2 (PGA R).
+ *  - Speaker amplifier: Awinic AW88258 (chip ID 0x1852) on i2c6 0x34, reset GPIO24 (active low),
+ *    I2S3 (GPIO67 LRCK, GPIO68 DO, GPIO71 BCK) for playback, I2S0 (GPIO70 DI) for I/V sense. There
+ *    is no speaker protection without the audio DSP, so the driver starts muted with the amplifier
+ *    off and a capped level. The amplifier interrupt (GPIO69) is not used.
+ *  - ACCDET (jack detection) on PMIC EINT0. Button voltages are read through the AUXADC ACCDET
+ *    channel with thresholds of 80/220/400 mV (the vendor kernel additionally applies a 14 mV efuse
+ *    offset, which is not handled here).
+ * Not described: audio DSP, modem voice path.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/iio/adc/mediatek,mt6359-auxadc.h>
+#include <dt-bindings/pinctrl/mediatek,mt6785-pinfunc.h>
+
+/ {
+	sound: sound {
+		compatible = "mediatek,mt6785-mt6359-sound";
+		model = "mt6785_mt6359";
+		mediatek,platform = <&afe>;
+
+		pinctrl-names = "aud_clk_mosi_off", "aud_clk_mosi_on",
+				"aud_dat_mosi_off", "aud_dat_mosi_on",
+				"aud_dat_miso_off", "aud_dat_miso_on",
+				"aud_dat_mosi_ch34_off", "aud_dat_mosi_ch34_on",
+				"aud_dat_miso_ch34_off", "aud_dat_miso_ch34_on",
+				"aud_gpio_i2s0_off", "aud_gpio_i2s0_on",
+				"aud_gpio_i2s3_off", "aud_gpio_i2s3_on";
+		pinctrl-0 = <&aud_clk_mosi_off_pins>;
+		pinctrl-1 = <&aud_clk_mosi_on_pins>;
+		pinctrl-2 = <&aud_dat_mosi_off_pins>;
+		pinctrl-3 = <&aud_dat_mosi_on_pins>;
+		pinctrl-4 = <&aud_dat_miso_off_pins>;
+		pinctrl-5 = <&aud_dat_miso_on_pins>;
+		pinctrl-6 = <&aud_dat_mosi_ch34_off_pins>;
+		pinctrl-7 = <&aud_dat_mosi_ch34_on_pins>;
+		pinctrl-8 = <&aud_dat_miso_ch34_off_pins>;
+		pinctrl-9 = <&aud_dat_miso_ch34_on_pins>;
+		pinctrl-10 = <&aud_gpio_i2s0_off_pins>;
+		pinctrl-11 = <&aud_gpio_i2s0_on_pins>;
+		pinctrl-12 = <&aud_gpio_i2s3_off_pins>;
+		pinctrl-13 = <&aud_gpio_i2s3_on_pins>;
+		mediatek,accdet = <&accdet>;
+
+		audio-routing =
+			"Headphone", "Headphone L",
+			"Headphone", "Headphone R",
+			"Earpiece", "Receiver",
+			"AIN0", "Main Mic",
+			"AIN1", "Headset Mic",
+			"AIN2", "Sub Mic",
+			"Speaker", "SPK";
+
+		status = "okay";
+
+		dai-link-0 {
+			link-name = "Primary Codec";
+
+			codec {
+				sound-dai = <&pmic 0>;
+			};
+		};
+
+		dai-link-1 {
+			link-name = "Primary Codec CH34";
+
+			codec {
+				sound-dai = <&pmic 1>;
+			};
+		};
+
+		dai-link-2 {
+			link-name = "I2S3";
+
+			codec {
+				sound-dai = <&speaker_amp>;
+			};
+		};
+	};
+};
+
+/*
+ * Audio clock controller (AUDIO_TOP_CON0/1), parent of the AFE, disabled in the common board file.
+ * Its probe only registers gates and creates the AFE as a child device; the registers are accessed
+ * only after the AFE has powered up the audio domain.
+ */
+&audsys {
+	status = "okay";
+};
+
+&afe {
+	status = "okay";
+};
+
+/* MIC_TYPE_MUX_DCC = 3, no DMIC. VAUD18 is requested by the codec driver as a DAPM supply. */
+&mt6359codec {
+	vaud18-supply = <&mt6359_vaud18_ldo_reg>;
+	mediatek,dmic-mode = <0>;
+	mediatek,mic-type-0 = <3>;
+	mediatek,mic-type-1 = <3>;
+	mediatek,mic-type-2 = <3>;
+};
+
+&i2c6 {
+	speaker_amp: audio-codec@34 {
+		compatible = "awinic,aw88258";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		reset-gpios = <&pio 24 GPIO_ACTIVE_LOW>;
+		firmware-name = "aw882xx_spk_reg.bin";
+	};
+};
+
+&pmic {
+	accdet: accdet {
+		compatible = "mediatek,mt6359-accdet";
+		mediatek,mic-vol = <8>;
+		mediatek,plugout-debounce = <1>;
+		mediatek,mic-mode = <2>;
+		mediatek,pwm-deb-setting = <0x500 0x500 1 0x1f0 0x800 0x800 0x20 0x44
+					    4 1 5 3 3 5 0xe>;
+		mediatek,eint-use-ap = <0>;
+		mediatek,eint-num = <0>;
+		mediatek,eint-use-ext-res = <0>;
+		mediatek,key-mode = <0>;
+		mediatek,three-key-thr = <0 0x50 0xdc 0x190>;
+		/* Button voltage: AUXADC channel 5, 12 bit, 1.8 V full scale */
+		io-channels = <&pmic_adc MT6359_AUXADC_ACCDET>;
+		io-channel-names = "accdet";
+	};
+};
+
+&pio {
+	aud_gpio_i2s0_off_pins: aud-gpio-i2s0-off-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO70__FUNC_GPIO70>;
+		};
+	};
+
+	aud_gpio_i2s0_on_pins: aud-gpio-i2s0-on-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO70__FUNC_I2S0_DI>;
+		};
+	};
+
+	aud_gpio_i2s3_off_pins: aud-gpio-i2s3-off-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO67__FUNC_GPIO67>,
+				 <PINMUX_GPIO68__FUNC_GPIO68>,
+				 <PINMUX_GPIO71__FUNC_GPIO71>;
+		};
+	};
+
+	aud_gpio_i2s3_on_pins: aud-gpio-i2s3-on-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO67__FUNC_I2S3_LRCK>,
+				 <PINMUX_GPIO68__FUNC_I2S3_DO>,
+				 <PINMUX_GPIO71__FUNC_I2S3_BCK>;
+		};
+	};
+
+	aud_clk_mosi_off_pins: aud-clk-mosi-off-pins {
+		pins-clk {
+			pinmux = <PINMUX_GPIO189__FUNC_GPIO189>,
+				 <PINMUX_GPIO190__FUNC_GPIO190>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_clk_mosi_on_pins: aud-clk-mosi-on-pins {
+		pins-clk {
+			pinmux = <PINMUX_GPIO189__FUNC_AUD_CLK_MOSI>,
+				 <PINMUX_GPIO190__FUNC_AUD_SYNC_MOSI>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_mosi_off_pins: aud-dat-mosi-off-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO191__FUNC_GPIO191>,
+				 <PINMUX_GPIO192__FUNC_GPIO192>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_mosi_on_pins: aud-dat-mosi-on-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO191__FUNC_AUD_DAT_MOSI0>,
+				 <PINMUX_GPIO192__FUNC_AUD_DAT_MOSI1>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_miso_off_pins: aud-dat-miso-off-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO193__FUNC_GPIO193>,
+				 <PINMUX_GPIO194__FUNC_GPIO194>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_miso_on_pins: aud-dat-miso-on-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO193__FUNC_AUD_DAT_MISO0>,
+				 <PINMUX_GPIO194__FUNC_AUD_DAT_MISO1>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_mosi_ch34_off_pins: aud-dat-mosi-ch34-off-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO143__FUNC_GPIO143>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_mosi_ch34_on_pins: aud-dat-mosi-ch34-on-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO143__FUNC_AUD_DAT_MOSI2>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_miso_ch34_off_pins: aud-dat-miso-ch34-off-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO146__FUNC_GPIO146>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_miso_ch34_on_pins: aud-dat-miso-ch34-on-pins {
+		pins-dat {
+			pinmux = <PINMUX_GPIO146__FUNC_AUD_DAT_MISO2>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+};
