@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Motorola Moto G60s (lisbon): USB gadget only, no display node. */
+
+/dts-v1/;
+
+#include "mt6785-motorola-lisbon-common.dtsi"
+
+/ {
+	model = "Motorola Moto G60s (lisbon)";
+	compatible = "motorola,lisbon", "mediatek,mt6785";
+};
