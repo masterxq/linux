@@ -21,6 +21,66 @@ properties:
     description: Maximum CHGIN regulation voltage in uV.
     enum: [ 5500000, 6500000, 11000000, 14500000 ]
 
+  monitored-battery:
+    description: |
+      simple-battery node. constant-charge-voltage-max-microvolt,
+      constant-charge-current-max-microamp, precharge-current-microamp and
+      charge-term-current-microamp are programmed at probe; requests from
+      user space stay within the first two.
+      operating-range-celsius enables a temperature guard that clears
+      CHG_EN outside the range (needs mediatek,battery-thermal-zone).
+      Between operating-range-celsius and alert-celsius the guard charges
+      with the cool and warm limits below.
+
+  input-current-limit-microamp:
+    description: Input current limit (AICR) programmed at probe.
+    minimum: 100000
+    maximum: 3250000
+
+  richtek,safety-timer-hours:
+    description: Enable the fast charge safety timer with this duration.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [ 4, 6, 8, 10, 12, 14, 16, 20 ]
+
+  richtek,disable-charger-watchdog:
+    type: boolean
+    description: Clear the charger I2C watchdog, so that programmed limits
+      are not reset to defaults when the host does not kick it.
+
+  mediatek,battery-thermal-zone:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Thermal zone node measuring the battery temperature.
+
+  mediatek,cool-charge-current-microamp:
+    description: Charge current limit between the lower ends of
+      operating-range-celsius and alert-celsius of the monitored battery.
+    minimum: 100000
+    maximum: 5000000
+
+  mediatek,cool-charge-voltage-microvolt:
+    description: Charge voltage limit between the lower ends of
+      operating-range-celsius and alert-celsius of the monitored battery.
+    minimum: 3900000
+    maximum: 4710000
+
+  mediatek,warm-charge-current-microamp:
+    description: Charge current limit between the upper ends of
+      alert-celsius and operating-range-celsius of the monitored battery.
+    minimum: 100000
+    maximum: 5000000
+
+  mediatek,warm-charge-voltage-microvolt:
+    description: Charge voltage limit between the upper ends of
+      alert-celsius and operating-range-celsius of the monitored battery.
+    minimum: 3900000
+    maximum: 4710000
+
+  mediatek,input-source:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Device whose power supply describes the charger input, such
+      as the USB Type-C port controller. The input current limit follows its
+      current_max, and above 5.5 V MIVR is set 1.2 V below its voltage_now.
+
   usb-otg-vbus-regulator:
     type: object
     description: OTG boost regulator.
