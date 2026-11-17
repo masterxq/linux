@@ -156,8 +156,13 @@ static int regulator_userspace_consumer_probe(struct platform_device *pdev)
 
 	mutex_init(&drvdata->lock);
 
-	ret = devm_regulator_bulk_get_exclusive(&pdev->dev, drvdata->num_supplies,
-						drvdata->supplies);
+	/*
+	 * Shared, not exclusive: the supply may also feed other consumers, e.g.
+	 * regulator-haptic for a vibration motor. The supply has to be off at
+	 * probe, otherwise a "disabled" write would unbalance the enable count.
+	 */
+	ret = devm_regulator_bulk_get(&pdev->dev, drvdata->num_supplies,
+				      drvdata->supplies);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to get supplies\n");
 
