@@ -644,6 +644,21 @@ static void mtu3_state_reset(struct mtu3 *mtu)
 	mtu->test_mode = false;
 }
 
+/*
+ * System suspend leaves the bus: like a soft disconnect followed by a UDC
+ * stop, but the gadget driver stays bound and the soft connect request is
+ * kept for the restart after resume. Called with mtu->lock held.
+ */
+void mtu3_gadget_suspend_bus(struct mtu3 *mtu)
+{
+	unsigned int softconnect = mtu->softconnect;
+
+	stop_activity(mtu);
+	mtu3_state_reset(mtu);
+	usb_gadget_set_state(&mtu->g, USB_STATE_NOTATTACHED);
+	mtu->softconnect = softconnect;
+}
+
 static void init_hw_ep(struct mtu3 *mtu, struct mtu3_ep *mep,
 		u32 epnum, u32 is_in)
 {

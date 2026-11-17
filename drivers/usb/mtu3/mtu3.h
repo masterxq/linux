@@ -367,6 +367,7 @@ struct mtu3 {
 	unsigned delayed_status:1;
 	unsigned gen2cp:1;
 	unsigned connected:1;
+	unsigned suspend_stopped:1;
 	unsigned async_callbacks:1;
 	unsigned separate_fifo:1;
 
@@ -442,6 +443,7 @@ void mtu3_gadget_reset(struct mtu3 *mtu);
 void mtu3_gadget_suspend(struct mtu3 *mtu);
 void mtu3_gadget_resume(struct mtu3 *mtu);
 void mtu3_gadget_disconnect(struct mtu3 *mtu);
+void mtu3_gadget_suspend_bus(struct mtu3 *mtu);
 
 irqreturn_t mtu3_ep0_isr(struct mtu3 *mtu);
 extern const struct usb_ep_ops mtu3_ep0_ops;
