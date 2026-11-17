@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with audio: AFE, MT6359 codec (headphones, earpiece, analog
+ * microphones, jack detection) and AW88258 speaker amplifier, see
+ * mt6785-motorola-lisbon-audio.dtsi.
+ *
+ * The AFE is in the audio power domain of the SPM power controller (power-domains in mt6785.dtsi);
+ * the domain is off at boot and powered up by the AFE as its first user.
+ */
+
+#include "mt6785-motorola-lisbon.dts"
+#include "mt6785-motorola-lisbon-audio.dtsi"
