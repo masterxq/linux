@@ -19,6 +19,12 @@
 #define MT8183_SCP_WDT_INT_BIT		BIT(8)
 #define MT8183_HOST_TO_SCP		0x28
 #define MT8183_HOST_IPC_INT_BIT		BIT(0)
+#define MT6785_SCP_TO_SPM		0x20
+#define MT6785_HOST_IPC_AWAKE_BIT	BIT(2)
+#define MT6785_SCP_GPR(x)		(0x50 + (x) * 4)
+#define MT6785_SCP_DEBUG_PC		0xb4
+#define MT6785_SCP_SLEEP_STATUS		0x114
+#define MT6785_SCP_A_IS_SLEEP		BIT(0)
 #define MT8183_WDT_CFG			0x84
 #define MT8183_SCP_CLK_SW_SEL		0x4000
 #define MT8183_SCP_CLK_DIV_SEL		0x4024
@@ -79,6 +85,11 @@
 
 #define SCP_FW_VER_LEN			32
 
+/* tinysys loader layout in SCP SRAM (MT6785 and other "v01" SCPs) */
+#define MTK_SCP_REGION_INFO_OFFSET	0x400
+#define MTK_SCP_RTOS_START		0x800
+#define MTK_SCP_PLATFORM_LEN		12
+
 struct scp_run {
 	u32 signaled;
 	s8 fw_ver[SCP_FW_VER_LEN];
@@ -95,10 +106,39 @@ struct scp_ipi_desc {
 };
 
 struct mtk_scp;
+struct regmap;
 
 struct mtk_scp_sizes_data {
 	size_t max_dram_size;
 	size_t ipi_share_buffer_size;
+	/* bytes between the len field and the payload of a share object */
+	size_t ipi_share_buffer_reserved;
+};
+
+/**
+ * struct mtk_scp_region_info - loader parameters in SCP SRAM
+ *
+ * Written by the bootloader at %MTK_SCP_REGION_INFO_OFFSET together with the
+ * tinysys loader at SRAM offset 0. The loader copies the firmware from
+ * @ap_firmware_start to %MTK_SCP_RTOS_START and jumps to it. All addresses
+ * are AP physical addresses.
+ */
+struct mtk_scp_region_info {
+	u32 ap_loader_start;
+	u32 ap_loader_size;
+	u32 ap_firmware_start;
+	u32 ap_firmware_size;
+	u32 ap_dram_start;
+	u32 ap_dram_size;
+	u32 ap_dram_backup_start;
+	u32 struct_size;
+	u32 scp_log_thru_ap_uart;
+	u32 task_context_ptr;
+	u32 il1c_con;
+	u32 dl1c_con;
+	u32 scpctl;
+	u32 ap_params_start;
+	char platform[MTK_SCP_PLATFORM_LEN];
 };
 
 struct mtk_scp_of_data {
@@ -109,9 +149,20 @@ struct mtk_scp_of_data {
 	void (*scp_reset_deassert)(struct mtk_scp *scp);
 	void (*scp_stop)(struct mtk_scp *scp);
 	void *(*scp_da_to_va)(struct mtk_scp *scp, u64 da, size_t len);
+	/* firmware placed in SRAM/DRAM by the bootloader instead of an ELF file */
+	int (*scp_preload_init)(struct mtk_scp *scp);
+	/* keep the SCP out of deep sleep while the AP accesses its SRAM */
+	int (*scp_awake)(struct mtk_scp *scp, bool awake);
+	const struct rproc_ops *rproc_ops;
 
 	u32 host_to_scp_reg;
 	u32 host_to_scp_int_bit;
+	/* bits of host_to_scp_reg that mean "previous IPI not taken yet", 0: all */
+	u32 host_to_scp_busy_mask;
+
+	/* IPI the firmware sends once it runs, SCP_IPI_INIT if not set */
+	u32 init_ipi_id;
+	scp_ipi_handler_t init_ipi_handler;
 
 	size_t ipi_buf_offset;
 	const struct mtk_scp_sizes_data *scp_sizes;
@@ -155,6 +206,27 @@ struct mtk_scp {
 
 	struct list_head elem;
 	struct mtk_scp_of_cluster *cluster;
+
+	/* bootloader-loaded firmware (scp_preload_init) */
+	struct mtk_scp_region_info region_info;
+	void *loader;
+	struct regmap *infracfg;
+	u32 ready_info;
+	bool running;
+
+	/* scp_awake_get()/scp_awake_put() */
+	struct mutex awake_lock;
+	unsigned int awake_count;
+
+	/* statistics */
+	unsigned int ipi_rx_count;
+	unsigned int ipi_rx_unhandled;
+	unsigned int ipi_tx_count;
+	unsigned int ipi_tx_timeout;
+	unsigned int awake_fail;
+	unsigned int wdt_count;
+	u32 ipi_last_rx_id;
+	u32 ipi_last_tx_id;
 };
 
 /**
@@ -171,6 +243,9 @@ struct mtk_share_obj {
 };
 
 void scp_memcpy_aligned(void __iomem *dst, const void *src, unsigned int len);
+void __iomem *scp_ipi_payload(struct mtk_scp *scp, struct mtk_share_obj __iomem *obj);
+int scp_awake_get(struct mtk_scp *scp);
+void scp_awake_put(struct mtk_scp *scp);
 void scp_ipi_lock(struct mtk_scp *scp, u32 id);
 void scp_ipi_unlock(struct mtk_scp *scp, u32 id);
 
