@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Motorola Moto G60s (lisbon) with the AW99703 backlight on I2C6. */
+
+#include "mt6785-motorola-lisbon-m1.dts"
+#include "mt6785-motorola-lisbon-backlight.dtsi"
