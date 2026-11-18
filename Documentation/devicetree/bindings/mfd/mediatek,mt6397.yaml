@@ -55,10 +55,17 @@ properties:
 
   rtc:
     type: object
-    $ref: /schemas/rtc/rtc.yaml#
+    allOf:
+      - $ref: /schemas/rtc/rtc.yaml#
+      - $ref: /schemas/power/reset/reboot-mode.yaml#
     unevaluatedProperties: false
-    description:
+    description: |
       MT6397 Real Time Clock.
+
+      On MT6358 compatible RTCs the bootloader evaluates spare bits of the
+      RTC_PDN1 register (bit 13: fastboot, bits 5:4 = 1: recovery). The
+      optional mode-* properties (see reboot-mode.yaml) give the value that is
+      written to these bits; only bits within 0x2030 may be set.
 
     properties:
       compatible:
@@ -74,6 +81,20 @@ properties:
               - const: mediatek,mt6358-rtc
 
       start-year: true
+
+      mediatek,year-base-1968:
+        type: boolean
+        description: |
+          The year register (0..127) counts from 1968 instead of 1900. MediaTek
+          bootloaders and vendor kernels of Android devices keep the RTC with
+          this base (RTC_MIN_YEAR = 1968). Without the property the driver
+          reads such an RTC 68 years early, and the range expansion of the RTC
+          core then adds 128 years (2026 shows up as 2086). Range with the
+          property: 1968..2095.
+
+    patternProperties:
+      "^mode-.*$":
+        maxItems: 1
 
     required:
       - compatible
@@ -106,6 +127,77 @@ properties:
     type: object
     $ref: /schemas/iio/adc/mediatek,mt6359-auxadc.yaml#
     unevaluatedProperties: false
+
+  accdet:
+    type: object
+    description:
+      Accessory (headset jack and button) detection of the MT6359. The
+      properties are read by the mt6359-accdet driver.
+    additionalProperties: true
+
+    properties:
+      compatible:
+        const: mediatek,mt6359-accdet
+      mediatek,mic-vol:
+        description: MIC bias voltage selection
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,plugout-debounce:
+        description: Plug-out debounce selection
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,mic-mode:
+        description: Microphone mode (1 ACC, 2 DCC, 6 DCC with internal bias)
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-level-pol:
+        description: EINT polarity
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-use-ap:
+        description: 0 PMIC EINT, 1 AP GPIO EINT
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-detect-mode:
+        description: EINT detect mode
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-num:
+        description: 0 EINT0, 1 EINT1, 2 both
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-trig-mode:
+        description: 0 GPIO trigger, 1 inverter trigger
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-use-ext-res:
+        description: External resistor on the EINT line
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,eint-comp-vth:
+        description: EINT comparator threshold
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,key-mode:
+        description: 0 three keys, 1 four keys, 2 three keys CDD
+        $ref: /schemas/types.yaml#/definitions/uint32
+      mediatek,pwm-deb-setting:
+        description: ACCDET PWM and debounce settings
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        maxItems: 15
+      mediatek,three-key-thr:
+        description: Three-key thresholds
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        maxItems: 4
+      mediatek,tri-key-cdd-thr:
+        description: Three-key CDD thresholds
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        maxItems: 4
+      mediatek,four-key-thr:
+        description: Four-key thresholds
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        maxItems: 5
+      io-channels:
+        description:
+          AUXADC channel that measures the microphone line voltage while a
+          headset button is held (MT6359_AUXADC_ACCDET). Without it every
+          button is reported as the first one.
+        maxItems: 1
+      io-channel-names:
+        const: accdet
+
+    required:
+      - compatible
 
   audio-codec:
     type: object
