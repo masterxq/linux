@@ -190,6 +190,9 @@ static u16 infra_idx_map[] = {
 	[MT6785_INFRA_UFS_UNIPRO_RST] = 2 * RST_NR_PER_BANK + 7,
 	[MT6785_INFRA_SVS_RST] = 3 * RST_NR_PER_BANK + 5,
 	[MT6785_INFRA_UFS_AES_RST] = 3 * RST_NR_PER_BANK + 21,
+	[MT6785_INFRA_CCIF0_RST] = 3 * RST_NR_PER_BANK + 8,
+	[MT6785_INFRA_DPMAIF_AO_RST] = 2 * RST_NR_PER_BANK + 6,
+	[MT6785_INFRA_DPMAIF_PD_RST] = 3 * RST_NR_PER_BANK + 2,
 };
 
 static const struct mtk_clk_rst_desc clk_rst_desc = {
