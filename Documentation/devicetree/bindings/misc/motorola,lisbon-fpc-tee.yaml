@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/motorola,lisbon-fpc-tee.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Motorola Moto G60s (lisbon) fingerprint sensor lines
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  Normal world side of the FPC fingerprint sensor of the Motorola Moto G60s. The sensor
+  hangs on SPI0, which is driven from the secure world only; a trusted application
+  talks to the chip. The normal world owns the supply, the reset line, the interrupt
+  line and the SPI0 clock, which it switches on request of the user space client of
+  that trusted application.
+
+properties:
+  compatible:
+    const: motorola,lisbon-fpc-tee
+
+  reset-gpios:
+    maxItems: 1
+
+  enable-gpios:
+    maxItems: 1
+    description: Switch of the sensor supply.
+
+  irq-gpios:
+    maxItems: 1
+    description: Interrupt line of the sensor, active high.
+
+  vdd-supply: true
+
+  clocks:
+    items:
+      - description: parent of the SPI clock mux
+      - description: SPI clock mux
+      - description: SPI0 clock gate
+
+  clock-names:
+    items:
+      - const: parent
+      - const: selector
+      - const: spi
+
+required:
+  - compatible
+  - reset-gpios
+  - enable-gpios
+  - irq-gpios
+  - vdd-supply
+  - clocks
+  - clock-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/gpio/gpio.h>
+
+    fingerprint {
+        compatible = "motorola,lisbon-fpc-tee";
+        reset-gpios = <&pio 105 GPIO_ACTIVE_LOW>;
+        enable-gpios = <&pio 79 GPIO_ACTIVE_HIGH>;
+        irq-gpios = <&pio 75 GPIO_ACTIVE_HIGH>;
+        vdd-supply = <&mt6360_ldo1>;
+        clocks = <&topckgen CLK_TOP_MAINPLL_D5_D2>,
+                 <&topckgen CLK_TOP_SPI>, <&infracfg CLK_INFRA_SPI0>;
+        clock-names = "parent", "selector", "spi";
+    };
