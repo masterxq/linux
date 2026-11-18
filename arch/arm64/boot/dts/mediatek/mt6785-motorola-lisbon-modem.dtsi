@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): cellular modem (MD1) with the DPMAIF data path.
+ *
+ *  - CCIF0 AP 0x10209000 / MD 0x1020a000, IRQ SPI 174 (data) and 175 (control), level low; modem
+ *    watchdog SPI 77 edge falling
+ *  - MD_CCIF4 0x1024d000 (acknowledged when the CCIF4 MD gate goes off)
+ *  - BROM pass flags security_ao + 0x824..0x830, boot slave enable 0x20000024 (MD side, written
+ *    once after MD1 power on)
+ *  - gates infra-ccif* and infra-dpmaif-clk
+ *  - DPMAIF: AO_UL 0x10014000, AO_DL 0x10014400, PD_UL 0x1022d000, PD_DL 0x1022d100 (with RDMA
+ *    +0x100, WDMA +0x200), PD_MISC 0x1022d400, PD_MD_MISC 0x1022c000, SRAM 0x1022e000, IRQ SPI 199
+ *    level high. The sizes are those the register map uses. Resets: INFRA_RST 0x140 bit 6 (AO),
+ *    0x150 bit 2 (PD).
+ *  - VMODEM/VSRAM_MD: the driver restores the boot value of VMODEM and sets VSRAM_MD to 993750 uV;
+ *    the regulator constraints stay as in mt6359.dtsi
+ *  - SWTP (transmit power switch): GPIO13, debounce 512 ms; low means "plug in", hence active low
+ * Not here: the md_auxadc channel, SIM hot plug and the GPIO usage table (the bootloader fills them
+ * into /lk-dtbo-sink from its overlay, the driver reads them there).
+ * The modem driver is an external module; without it nothing touches the hardware described here.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/reset/mediatek,mt6785-resets.h>
+
+&{/soc} {
+	modem@10209000 {
+		compatible = "mediatek,mt6785-ccci";
+		reg = <0 0x10209000 0 0x1000>,
+		      <0 0x1020a000 0 0x1000>,
+		      <0 0x1024d000 0 0x1000>,
+		      <0 0x1001a824 0 0x10>,
+		      <0 0x20000024 0 0x4>,
+		      <0 0x10014000 0 0x400>,
+		      <0 0x10014400 0 0x400>,
+		      <0 0x1022d000 0 0x100>,
+		      <0 0x1022d100 0 0x300>,
+		      <0 0x1022d400 0 0x400>,
+		      <0 0x1022c000 0 0x1000>,
+		      <0 0x1022e000 0 0x1000>;
+		reg-names = "ap-ccif", "md-ccif", "md-ccif4", "sec-ao", "md-boot",
+			    "dpmaif-ao-ul", "dpmaif-ao-dl", "dpmaif-pd-ul",
+			    "dpmaif-pd-dl", "dpmaif-pd-misc", "dpmaif-pd-md-misc",
+			    "dpmaif-sram";
+		interrupts = <GIC_SPI 77 IRQ_TYPE_EDGE_FALLING>,
+			     <GIC_SPI 174 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 175 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 199 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "mdwdt", "ccif0-data", "ccif0-ctrl", "dpmaif";
+		clocks = <&infracfg CLK_INFRA_CCIF_AP>,
+			 <&infracfg CLK_INFRA_CCIF_MD>,
+			 <&infracfg CLK_INFRA_CCIF1_AP>,
+			 <&infracfg CLK_INFRA_CCIF1_MD>,
+			 <&infracfg CLK_INFRA_CCIF2_AP>,
+			 <&infracfg CLK_INFRA_CCIF2_MD>,
+			 <&infracfg CLK_INFRA_CCIF4_MD>,
+			 <&infracfg CLK_INFRA_DPMAIF>;
+		clock-names = "ccif-ap", "ccif-md", "ccif1-ap", "ccif1-md",
+			      "ccif2-ap", "ccif2-md", "ccif4-md", "dpmaif";
+		resets = <&infracfg MT6785_INFRA_CCIF0_RST>,
+			 <&infracfg MT6785_INFRA_DPMAIF_AO_RST>,
+			 <&infracfg MT6785_INFRA_DPMAIF_PD_RST>;
+		reset-names = "ccif0", "dpmaif-ao", "dpmaif-pd";
+		mediatek,infracfg = <&infracfg>;
+		mediatek,infracfg-nao = <&infracfg_nao>;
+		mediatek,scpsys = <&scpsys>;
+		mediatek,pwrap = <&pwrap>;
+		vmodem-supply = <&mt6359_vmodem_buck_reg>;
+		vsram-md-supply = <&mt6359_vsram_md_ldo_reg>;
+		mediatek,swtp-gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+	};
+};

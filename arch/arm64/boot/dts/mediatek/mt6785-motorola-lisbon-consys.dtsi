@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): connectivity subsystem (CONNAC1 "soc1_0", MT6631 RF).
+ *
+ *  - EMI: 4 MiB, 16 MiB aligned, dynamically allocated below 0xc0000000. No fixed "reg": the
+ *    bootloader adds its own fixed entries to reserved-memory. No compatible: the region is only
+ *    referenced through memory-region.
+ *  - Supplies: VCN18 1.8 V, VCN33_1 (WIFI enable bit) 3.3 V, VCN33_2 (WIFI enable bit) 2.8 V; the
+ *    constraints pin the voltages so nothing higher can be requested.
+ *  - Pins 156..164 function CONN (A-die interface), 2 mA; "off" switches them to GPIO mode (mode
+ *    bits only).
+ *  - Co-clock mode (co_clock_flag=1).
+ */
+
+&{/reserved-memory} {
+	consys_emi: consys-reserve-memory {
+		no-map;
+		size = <0 0x400000>;
+		alignment = <0 0x1000000>;
+		alloc-ranges = <0 0x40000000 0 0x80000000>;
+	};
+
+	/*
+	 * WFDMA rings and buffers of the WLAN driver. 4 MiB hold all 768 TX buffers plus 1 MiB of
+	 * firmware download buffers (about 0x3d2100 used).
+	 */
+	wifi_mem: wifi-reserve-memory {
+		compatible = "shared-dma-pool";
+		no-map;
+		size = <0 0x400000>;
+		alignment = <0 0x1000000>;
+		alloc-ranges = <0 0x40000000 0 0x80000000>;
+	};
+};
+
+&pio {
+	consys_pins_on: consys-on-pins {
+		pins-conn {
+			pinmux = <PINMUX_GPIO156__FUNC_CONN_TOP_CLK>,
+				 <PINMUX_GPIO157__FUNC_CONN_TOP_DATA>,
+				 <PINMUX_GPIO158__FUNC_CONN_HRST_B>,
+				 <PINMUX_GPIO159__FUNC_CONN_WB_PTA>,
+				 <PINMUX_GPIO160__FUNC_CONN_BT_CLK>,
+				 <PINMUX_GPIO161__FUNC_CONN_BT_DATA>,
+				 <PINMUX_GPIO162__FUNC_CONN_WF_CTRL0>,
+				 <PINMUX_GPIO163__FUNC_CONN_WF_CTRL1>,
+				 <PINMUX_GPIO164__FUNC_CONN_WF_CTRL2>;
+			drive-strength = <2>;
+		};
+	};
+
+	consys_pins_off: consys-off-pins {
+		pins-conn {
+			pinmux = <PINMUX_GPIO156__FUNC_GPIO156>,
+				 <PINMUX_GPIO157__FUNC_GPIO157>,
+				 <PINMUX_GPIO158__FUNC_GPIO158>,
+				 <PINMUX_GPIO159__FUNC_GPIO159>,
+				 <PINMUX_GPIO160__FUNC_GPIO160>,
+				 <PINMUX_GPIO161__FUNC_GPIO161>,
+				 <PINMUX_GPIO162__FUNC_GPIO162>,
+				 <PINMUX_GPIO163__FUNC_GPIO163>,
+				 <PINMUX_GPIO164__FUNC_GPIO164>;
+		};
+	};
+};
+
+&mt6359_vcn33_1_ldo_reg {
+	regulator-min-microvolt = <3300000>;
+	regulator-max-microvolt = <3300000>;
+};
+
+&mt6359_vcn33_2_ldo_reg {
+	regulator-min-microvolt = <2800000>;
+	regulator-max-microvolt = <2800000>;
+};
+
+&consys {
+	memory-region = <&consys_emi>;
+	vcn18-supply = <&mt6359_vcn18_ldo_reg>;
+	vcn33-1-supply = <&mt6359_vcn33_1_ldo_reg>;
+	vcn33-2-supply = <&mt6359_vcn33_2_ldo_reg>;
+	pinctrl-names = "on", "off";
+	pinctrl-0 = <&consys_pins_on>;
+	pinctrl-1 = <&consys_pins_off>;
+	mediatek,co-clock;
+	status = "okay";
+};
+
+&wifi {
+	memory-region = <&wifi_mem>;
+	status = "okay";
+};
+
+&bluetooth {
+	status = "okay";
+};
