@@ -644,6 +644,21 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config LISBON_CAMERA_PROBE
+	tristate "Motorola Moto G60s (lisbon) camera power and chip ID probe"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF_DYNAMIC && I2C && REGULATOR && COMMON_CLK && GPIOLIB && PINCTRL
+	help
+	  Camera power and chip ID probe for the Motorola Moto G60s (lisbon). On load
+	  it enables the camera buses, the camera LDOs and the sensor nodes
+	  of the lisbon-kamera device tree through a changeset, runs the
+	  vendor power-up sequence of each of the five camera sensors, reads
+	  the chip ID (and the VCM status and EEPROM headers), powers the
+	  sensor down again and prints the result. Unloading reverts the
+	  changeset.
+
+	  If unsure, say N.
+
 config LISBON_FPC
 	tristate "Motorola Moto G60s (lisbon) fingerprint sensor controls"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
