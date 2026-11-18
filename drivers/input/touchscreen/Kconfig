@@ -515,6 +515,21 @@ config TOUCHSCREEN_ILITEK
 	  To compile this driver as a module, choose M here: the
 	  module will be called ilitek_ts_i2c.
 
+config TOUCHSCREEN_ILITEK_TDDI_SPI
+	tristate "Ilitek TDDI (ILI7807S/ILI9881) SPI touchscreen"
+	depends on SPI && OF
+	depends on DRM_PANEL || !DRM_PANEL
+	select CRC32
+	select FW_LOADER
+	help
+	  Say Y here for the touch part of ILITEK touch and display driver
+	  integration chips (ILI7807S, ILI9881, ILI9882) connected over SPI.
+	  These chips need their firmware downloaded by the host on every
+	  reset.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ilitek_tddi_spi.
+
 config TOUCHSCREEN_IPROC
 	tristate "IPROC touch panel driver support"
 	depends on ARCH_BCM_IPROC || COMPILE_TEST
