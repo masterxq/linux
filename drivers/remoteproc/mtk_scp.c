@@ -7,12 +7,16 @@
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
+#include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/remoteproc.h>
 #include <linux/remoteproc/mtk_scp.h>
 #include <linux/rpmsg/mtk_rpmsg.h>
@@ -71,6 +75,7 @@ static void scp_wdt_handler(struct mtk_scp *scp, u32 scp_to_host)
 	struct mtk_scp_of_cluster *scp_cluster = scp->cluster;
 	struct mtk_scp *scp_node;
 
+	scp->wdt_count++;
 	dev_err(scp->dev, "SCP watchdog timeout! 0x%x", scp_to_host);
 
 	/* report watchdog timeout to all cores */
@@ -90,24 +95,36 @@ static void scp_init_ipi_handler(void *data, unsigned int len, void *priv)
 	wake_up_interruptible(&scp->run.wq);
 }
 
-static void scp_ipi_handler(struct mtk_scp *scp)
+/* Return: true if a handler took the message */
+static bool scp_ipi_handler(struct mtk_scp *scp)
 {
 	struct mtk_share_obj __iomem *rcv_obj = scp->recv_buf;
 	struct scp_ipi_desc *ipi_desc = scp->ipi_desc;
 	scp_ipi_handler_t handler;
-	u32 id = readl(&rcv_obj->id);
-	u32 len = readl(&rcv_obj->len);
+	u32 id, len;
 	const struct mtk_scp_sizes_data *scp_sizes;
+
+	if (!rcv_obj) {
+		dev_err(scp->dev, "ipi before the IPI buffers are set up\n");
+		return false;
+	}
+
+	id = readl(&rcv_obj->id);
+	len = readl(&rcv_obj->len);
+	scp->ipi_rx_count++;
+	scp->ipi_last_rx_id = id;
 
 	scp_sizes = scp->data->scp_sizes;
 	if (len > scp_sizes->ipi_share_buffer_size) {
 		dev_err(scp->dev, "ipi message too long (len %d, max %zd)", len,
 			scp_sizes->ipi_share_buffer_size);
-		return;
+		scp->ipi_rx_unhandled++;
+		return false;
 	}
 	if (id >= SCP_IPI_MAX) {
 		dev_err(scp->dev, "No such ipi id = %d\n", id);
-		return;
+		scp->ipi_rx_unhandled++;
+		return false;
 	}
 
 	scp_ipi_lock(scp, id);
@@ -115,16 +132,19 @@ static void scp_ipi_handler(struct mtk_scp *scp)
 	if (!handler) {
 		dev_err(scp->dev, "No handler for ipi id = %d\n", id);
 		scp_ipi_unlock(scp, id);
-		return;
+		scp->ipi_rx_unhandled++;
+		return false;
 	}
 
-	memcpy_fromio(scp->share_buf, &rcv_obj->share_buf, len);
+	memcpy_fromio(scp->share_buf, scp_ipi_payload(scp, rcv_obj), len);
 	memset(&scp->share_buf[len], 0, scp_sizes->ipi_share_buffer_size - len);
 	handler(scp->share_buf, len, ipi_desc[id].priv);
 	scp_ipi_unlock(scp, id);
 
 	scp->ipi_id_ack[id] = true;
 	wake_up(&scp->ack_wq);
+
+	return true;
 }
 
 static int scp_elf_read_ipi_buf_addr(struct mtk_scp *scp,
@@ -139,7 +159,7 @@ static int scp_ipi_init(struct mtk_scp *scp, const struct firmware *fw)
 	const struct mtk_scp_sizes_data *scp_sizes;
 
 	/* read the ipi buf addr from FW itself first */
-	ret = scp_elf_read_ipi_buf_addr(scp, fw, &offset);
+	ret = fw ? scp_elf_read_ipi_buf_addr(scp, fw, &offset) : -ENOENT;
 	if (ret) {
 		/* use default ipi buf addr if the FW doesn't have it */
 		offset = scp->data->ipi_buf_offset;
@@ -160,7 +180,8 @@ static int scp_ipi_init(struct mtk_scp *scp, const struct firmware *fw)
 	scp->recv_buf = (struct mtk_share_obj __iomem *)
 			(scp->sram_base + offset);
 	share_buf_offset = sizeof(scp->recv_buf->id)
-		+ sizeof(scp->recv_buf->len) + scp_sizes->ipi_share_buffer_size;
+		+ sizeof(scp->recv_buf->len) + scp_sizes->ipi_share_buffer_reserved
+		+ scp_sizes->ipi_share_buffer_size;
 	scp->send_buf = (struct mtk_share_obj __iomem *)
 			(scp->sram_base + offset + share_buf_offset);
 	memset_io(scp->recv_buf, 0, share_buf_offset);
@@ -948,6 +969,278 @@ static const struct rproc_ops scp_ops = {
 	.sanity_check	= rproc_elf_sanity_check,
 };
 
+/*
+ * MT6785: the bootloader (lk) loads the tinysys image of the scp partition
+ * (loader, firmware and DRAM part, no ELF) into SCP SRAM and the reserved DRAM
+ * region "SCP-reserved", writes the loader parameters to SRAM and keeps the
+ * core in reset. The driver attaches to that image: it releases the reset and
+ * waits for the READY IPI. A restart copies the loader and the saved parameters
+ * back to SRAM first, the loader then copies the firmware from DRAM again.
+ *
+ * Values and sequence follow the MediaTek vendor kernel for MT6785
+ * (reset_scp(), scp_sys_full_reset(), scp_awake_lock(), scp_A_irq_handler()).
+ */
+#define MT6785_SCP_IPI_READY		12
+#define MT6785_SCP_GPR_LOADER		6
+#define MT6785_INFRA_IRQ_SET		0xb14
+#define MT6785_INFRA_IRQ_CLEAR		0xb18
+#define MT6785_INFRA_IRQ_MAGIC		0xa0
+#define MT6785_INFRA_IRQ_MAGIC_MASK	GENMASK(7, 4)
+#define MT6785_AP_AWAKE_LOCK		BIT(0)
+#define MT6785_AP_AWAKE_UNLOCK		BIT(1)
+#define MT6785_AWAKE_TIMEOUT_US		(1000 * USEC_PER_MSEC)
+#define MT6785_HALT_TIMEOUT_US		(1000 * USEC_PER_MSEC)
+#define MT6785_READY_TIMEOUT_MS		2000
+
+static void mt6785_scp_irq_handler(struct mtk_scp *scp)
+{
+	void __iomem *base = scp->cluster->reg_base;
+	u32 scp_to_host;
+
+	scp_to_host = readl(base + MT8183_SCP_TO_HOST);
+
+	/* if WDT and IPI come together, the IPI is dropped */
+	if (scp_to_host & MT8183_SCP_WDT_INT_BIT) {
+		scp_wdt_handler(scp, scp_to_host);
+		writel(MT8183_SCP_WDT_INT_BIT, base + MT8183_SCP_TO_HOST);
+		return;
+	}
+
+	if (scp_to_host & MT8183_SCP_IPC_INT_BIT) {
+		/* the SCP stays awake until the AP has taken the message */
+		if (scp_ipi_handler(scp))
+			writel(MT6785_HOST_IPC_AWAKE_BIT, base + MT8183_HOST_TO_SCP);
+		writel(1, base + MT6785_SCP_TO_SPM);
+		writel(MT8183_SCP_IPC_INT_BIT, base + MT8183_SCP_TO_HOST);
+	}
+}
+
+/* READY carries the size of the SCP image the firmware was built for */
+static void mt6785_scp_ready_ipi_handler(void *data, unsigned int len, void *priv)
+{
+	struct mtk_scp *scp = priv;
+
+	if (len >= sizeof(u32))
+		scp->ready_info = *(u32 *)data;
+	scp->run.signaled = true;
+	wake_up_interruptible(&scp->run.wq);
+}
+
+static int mt6785_scp_awake(struct mtk_scp *scp, bool awake)
+{
+	u32 req = awake ? MT6785_AP_AWAKE_LOCK : MT6785_AP_AWAKE_UNLOCK;
+	u32 val;
+	int ret;
+
+	ret = regmap_write(scp->infracfg, MT6785_INFRA_IRQ_SET,
+			   MT6785_INFRA_IRQ_MAGIC | req);
+	if (ret)
+		return ret;
+
+	/* the SCP clears the request bit once it has handled it */
+	ret = regmap_read_poll_timeout(scp->infracfg, MT6785_INFRA_IRQ_SET, val,
+				       (val & MT6785_INFRA_IRQ_MAGIC_MASK) !=
+				       MT6785_INFRA_IRQ_MAGIC || !(val & req),
+				       10, MT6785_AWAKE_TIMEOUT_US);
+	if (!ret && (val & MT6785_INFRA_IRQ_MAGIC_MASK) != MT6785_INFRA_IRQ_MAGIC)
+		ret = -EIO;
+	if (ret)
+		dev_err(scp->dev, "awake %s failed: %d (0x%x)\n",
+			awake ? "lock" : "unlock", ret, val);
+
+	if (!regmap_read(scp->infracfg, MT6785_INFRA_IRQ_SET, &val))
+		regmap_write(scp->infracfg, MT6785_INFRA_IRQ_CLEAR, val);
+
+	return ret;
+}
+
+static int mt6785_scp_preload_init(struct mtk_scp *scp)
+{
+	struct mtk_scp_region_info *ri = &scp->region_info;
+	struct device *dev = scp->dev;
+	void __iomem *base = scp->cluster->reg_base;
+	void *loader;
+	int ret;
+
+	scp->infracfg = syscon_regmap_lookup_by_phandle(dev->of_node,
+							"mediatek,infracfg");
+	if (IS_ERR(scp->infracfg))
+		return dev_err_probe(dev, PTR_ERR(scp->infracfg),
+				     "no infracfg syscon\n");
+
+	ret = clk_prepare_enable(scp->clk);
+	if (ret)
+		return ret;
+
+	if (readl(base + MT8183_SW_RSTN) & MT8183_SW_RSTN_BIT) {
+		dev_err(dev, "SCP is already running, not taking it over\n");
+		ret = -EBUSY;
+		goto out;
+	}
+	if (readl(base + MT8183_SCP_SRAM_PDN)) {
+		dev_err(dev, "SCP SRAM is powered down: no image from the bootloader\n");
+		ret = -ENODEV;
+		goto out;
+	}
+
+	memcpy_fromio(ri, scp->sram_base + MTK_SCP_REGION_INFO_OFFSET, sizeof(*ri));
+	ri->platform[MTK_SCP_PLATFORM_LEN - 1] = '\0';
+
+	if (!ri->ap_loader_start || !ri->ap_loader_size ||
+	    ri->ap_loader_size > MTK_SCP_REGION_INFO_OFFSET + sizeof(*ri) ||
+	    !ri->ap_firmware_start || !ri->ap_firmware_size ||
+	    ri->ap_firmware_size > scp->sram_size - MTK_SCP_RTOS_START) {
+		dev_err(dev, "no valid loader parameters in SRAM (loader %#x+%#x, fw %#x+%#x)\n",
+			ri->ap_loader_start, ri->ap_loader_size,
+			ri->ap_firmware_start, ri->ap_firmware_size);
+		ret = -ENODEV;
+		goto out;
+	}
+
+	/* the DRAM copy of the loader stays untouched while the SCP runs */
+	loader = memremap(ri->ap_loader_start, ri->ap_loader_size, MEMREMAP_WC);
+	if (!loader) {
+		dev_err(dev, "cannot map the loader at %#x\n", ri->ap_loader_start);
+		ret = -ENOMEM;
+		goto out;
+	}
+	scp->loader = devm_kmemdup(dev, loader, ri->ap_loader_size, GFP_KERNEL);
+	memunmap(loader);
+	if (!scp->loader) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	dev_info(dev, "image from the bootloader: %s, loader %#x+%#x, fw %#x+%#x, dram %#x+%#x\n",
+		 ri->platform, ri->ap_loader_start, ri->ap_loader_size,
+		 ri->ap_firmware_start, ri->ap_firmware_size,
+		 ri->ap_dram_start, ri->ap_dram_size);
+
+	scp->rproc->state = RPROC_DETACHED;
+	/* start only on request (sysfs "start"), stop with "detach" */
+	scp->rproc->auto_boot = false;
+	/* keep a crashed SCP for inspection; recovery can be enabled in sysfs */
+	scp->rproc->recovery_disabled = true;
+	rproc_set_feature(scp->rproc, RPROC_FEAT_ATTACH_ON_RECOVERY);
+out:
+	clk_disable_unprepare(scp->clk);
+	return ret;
+}
+
+/* stop the core, waiting up to 1 s for it to sleep as the vendor kernel does */
+static void mt6785_scp_halt(struct mtk_scp *scp)
+{
+	void __iomem *base = scp->cluster->reg_base;
+	u32 val;
+
+	if (readl_poll_timeout(base + MT6785_SCP_SLEEP_STATUS, val,
+			       val & MT6785_SCP_A_IS_SLEEP, 20 * USEC_PER_MSEC,
+			       MT6785_HALT_TIMEOUT_US))
+		dev_warn(scp->dev, "SCP not asleep, resetting anyway\n");
+
+	mt8183_scp_reset_assert(scp);
+	writel(MT8183_SCP_IPC_INT_BIT | MT8183_SCP_WDT_INT_BIT,
+	       base + MT8183_SCP_TO_HOST);
+}
+
+static int mt6785_scp_attach(struct rproc *rproc)
+{
+	struct mtk_scp *scp = rproc->priv;
+	struct mtk_scp_region_info *ri = &scp->region_info;
+	void __iomem *base = scp->cluster->reg_base;
+	struct device *dev = scp->dev;
+	long timeout;
+	int ret;
+
+	ret = clk_enable(scp->clk);
+	if (ret)
+		return ret;
+
+	if (readl(base + MT8183_SW_RSTN) & MT8183_SW_RSTN_BIT) {
+		dev_err(dev, "SCP is not in reset\n");
+		ret = -EBUSY;
+		goto disable_clk;
+	}
+
+	/* same as the vendor recovery: loader and parameters back to SRAM */
+	scp_memcpy_aligned(scp->sram_base, scp->loader, ri->ap_loader_size);
+	scp_memcpy_aligned(scp->sram_base + MTK_SCP_REGION_INFO_OFFSET, ri,
+			   sizeof(*ri));
+
+	ret = scp_ipi_init(scp, NULL);
+	if (ret)
+		goto disable_clk;
+
+	writel(MT8183_SCP_IPC_INT_BIT | MT8183_SCP_WDT_INT_BIT,
+	       base + MT8183_SCP_TO_HOST);
+
+	/* the loader waits for this register to be 0 before it starts the firmware */
+	if (readl(base + MT6785_SCP_GPR(MT6785_SCP_GPR_LOADER)))
+		dev_warn(dev, "GPR%d is %#x, the loader may wait\n",
+			 MT6785_SCP_GPR_LOADER,
+			 readl(base + MT6785_SCP_GPR(MT6785_SCP_GPR_LOADER)));
+
+	scp->ready_info = 0;
+	scp->awake_count = 0;
+	scp->run.signaled = false;
+	mt8183_scp_reset_deassert(scp);
+
+	timeout = wait_event_interruptible_timeout(scp->run.wq, scp->run.signaled,
+						   msecs_to_jiffies(MT6785_READY_TIMEOUT_MS));
+	if (timeout <= 0) {
+		ret = timeout ? timeout : -ETIMEDOUT;
+		dev_err(dev, "no READY from the SCP: %d (pc %#x)\n", ret,
+			readl(base + MT6785_SCP_DEBUG_PC));
+		mt8183_scp_reset_assert(scp);
+		goto disable_clk;
+	}
+
+	/* clear the SPM request the firmware raises while it boots */
+	writel(0xff, base + MT6785_SCP_TO_SPM);
+
+	if (scp->ready_info != scp->sram_size)
+		dev_warn(dev, "firmware built for %#x bytes of SRAM, not %#zx\n",
+			 scp->ready_info, scp->sram_size);
+	dev_info(dev, "SCP is ready\n");
+
+	/* the clock stays on while the SCP runs */
+	scp->running = true;
+	return 0;
+
+disable_clk:
+	clk_disable(scp->clk);
+	return ret;
+}
+
+static int mt6785_scp_detach(struct rproc *rproc)
+{
+	struct mtk_scp *scp = rproc->priv;
+
+	if (!scp->running)
+		return 0;
+
+	mt6785_scp_halt(scp);
+	scp->running = false;
+	scp->run.signaled = false;
+	clk_disable(scp->clk);
+
+	return 0;
+}
+
+static int mt6785_scp_stop(struct rproc *rproc)
+{
+	return mt6785_scp_detach(rproc);
+}
+
+static const struct rproc_ops mt6785_scp_ops = {
+	.prepare	= scp_prepare,
+	.unprepare	= scp_unprepare,
+	.attach		= mt6785_scp_attach,
+	.detach		= mt6785_scp_detach,
+	.stop		= mt6785_scp_stop,
+	.da_to_va	= scp_da_to_va,
+};
+
 /**
  * scp_get_device() - get device struct of SCP
  *
@@ -1180,7 +1473,8 @@ static struct mtk_scp *scp_rproc_init(struct platform_device *pdev,
 		}
 	}
 
-	rproc = devm_rproc_alloc(dev, np->name, &scp_ops, fw_name, sizeof(*scp));
+	rproc = devm_rproc_alloc(dev, np->name, of_data->rproc_ops ?: &scp_ops,
+				 fw_name, sizeof(*scp));
 	if (!rproc) {
 		dev_err(dev, "unable to allocate remoteproc\n");
 		return ERR_PTR(-ENOMEM);
@@ -1212,11 +1506,20 @@ static struct mtk_scp *scp_rproc_init(struct platform_device *pdev,
 		return ERR_PTR(ret);
 
 	mutex_init(&scp->send_lock);
+	mutex_init(&scp->awake_lock);
 	for (i = 0; i < SCP_IPI_MAX; i++)
 		mutex_init(&scp->ipi_desc[i].lock);
 
+	if (scp->data->scp_preload_init) {
+		ret = scp->data->scp_preload_init(scp);
+		if (ret)
+			goto release_dev_mem;
+	}
+
 	/* register SCP initialization IPI */
-	ret = scp_ipi_register(scp, SCP_IPI_INIT, scp_init_ipi_handler, scp);
+	ret = scp_ipi_register(scp, scp->data->init_ipi_id,
+			       scp->data->init_ipi_handler ?: scp_init_ipi_handler,
+			       scp);
 	if (ret) {
 		dev_err(dev, "Failed to register IPI_SCP_INIT\n");
 		goto release_dev_mem;
@@ -1248,13 +1551,14 @@ static struct mtk_scp *scp_rproc_init(struct platform_device *pdev,
 
 remove_subdev:
 	scp_remove_rpmsg_subdev(scp);
-	scp_ipi_unregister(scp, SCP_IPI_INIT);
+	scp_ipi_unregister(scp, scp->data->init_ipi_id);
 	kfree(scp->share_buf);
 	scp->share_buf = NULL;
 release_dev_mem:
 	scp_unmap_memory_region(scp);
 	for (i = 0; i < SCP_IPI_MAX; i++)
 		mutex_destroy(&scp->ipi_desc[i].lock);
+	mutex_destroy(&scp->awake_lock);
 	mutex_destroy(&scp->send_lock);
 
 	return ERR_PTR(ret);
@@ -1265,12 +1569,13 @@ static void scp_free(struct mtk_scp *scp)
 	int i;
 
 	scp_remove_rpmsg_subdev(scp);
-	scp_ipi_unregister(scp, SCP_IPI_INIT);
+	scp_ipi_unregister(scp, scp->data->init_ipi_id);
 	kfree(scp->share_buf);
 	scp->share_buf = NULL;
 	scp_unmap_memory_region(scp);
 	for (i = 0; i < SCP_IPI_MAX; i++)
 		mutex_destroy(&scp->ipi_desc[i].lock);
+	mutex_destroy(&scp->awake_lock);
 	mutex_destroy(&scp->send_lock);
 }
 
@@ -1446,9 +1751,20 @@ static void scp_remove(struct platform_device *pdev)
 	struct mtk_scp_of_cluster *scp_cluster = scp->cluster;
 	struct mtk_scp *temp;
 
+	/*
+	 * Single core: the child devices are users of the rproc (MT6785 sensor
+	 * hub), remove them first. The core devices of a multi-core SCP stay
+	 * until the cores are gone.
+	 */
+	if (scp_is_single_core(pdev))
+		of_platform_depopulate(&pdev->dev);
+
 	list_for_each_entry_safe_reverse(scp, temp, &scp_cluster->mtk_scp_list, elem) {
 		list_del(&scp->elem);
 		rproc_del(scp->rproc);
+		/* a crashed preloaded SCP is not stopped by rproc_del() */
+		if (scp->running && scp->data->rproc_ops)
+			scp->data->rproc_ops->stop(scp->rproc);
 		scp_free(scp);
 	}
 	of_platform_depopulate(&pdev->dev);
@@ -1458,6 +1774,13 @@ static void scp_remove(struct platform_device *pdev)
 static const struct mtk_scp_sizes_data default_scp_sizes = {
 	.max_dram_size = 0x500000,
 	.ipi_share_buffer_size = 288,
+};
+
+/* share object: id, len, 8 reserved bytes, 272 bytes payload */
+static const struct mtk_scp_sizes_data mt6785_scp_sizes = {
+	.max_dram_size = 0x300000,
+	.ipi_share_buffer_size = 272,
+	.ipi_share_buffer_reserved = 8,
 };
 
 static const struct mtk_scp_sizes_data mt8188_scp_sizes = {
@@ -1473,6 +1796,25 @@ static const struct mtk_scp_sizes_data mt8188_scp_c1_sizes = {
 static const struct mtk_scp_sizes_data mt8195_scp_sizes = {
 	.max_dram_size = 0x800000,
 	.ipi_share_buffer_size = 288,
+};
+
+static const struct mtk_scp_of_data mt6785_of_data = {
+	.scp_clk_get = mt8183_scp_clk_get,
+	.scp_irq_handler = mt6785_scp_irq_handler,
+	.scp_reset_assert = mt8183_scp_reset_assert,
+	.scp_reset_deassert = mt8183_scp_reset_deassert,
+	.scp_da_to_va = mt8183_scp_da_to_va,
+	.scp_preload_init = mt6785_scp_preload_init,
+	.scp_awake = mt6785_scp_awake,
+	.rproc_ops = &mt6785_scp_ops,
+	.host_to_scp_reg = MT8183_HOST_TO_SCP,
+	.host_to_scp_int_bit = MT8183_HOST_IPC_INT_BIT,
+	.host_to_scp_busy_mask = MT8183_HOST_IPC_INT_BIT,
+	/* receive and send object right below the RTOS start */
+	.ipi_buf_offset = MTK_SCP_RTOS_START - 2 * 288,
+	.scp_sizes = &mt6785_scp_sizes,
+	.init_ipi_id = MT6785_SCP_IPI_READY,
+	.init_ipi_handler = mt6785_scp_ready_ipi_handler,
 };
 
 static const struct mtk_scp_of_data mt8183_of_data = {
@@ -1581,6 +1923,7 @@ static const struct mtk_scp_of_data *mt8195_of_data_cores[] = {
 };
 
 static const struct of_device_id mtk_scp_of_match[] = {
+	{ .compatible = "mediatek,mt6785-scp", .data = &mt6785_of_data },
 	{ .compatible = "mediatek,mt8183-scp", .data = &mt8183_of_data },
 	{ .compatible = "mediatek,mt8186-scp", .data = &mt8186_of_data },
 	{ .compatible = "mediatek,mt8188-scp", .data = &mt8188_of_data },
@@ -1598,11 +1941,22 @@ static int __maybe_unused scp_suspend(struct device *dev)
 	struct rproc *rproc = scp->rproc;
 
 	/*
+	 * Only the MT6785 ops attach to a firmware loaded by the boot loader.
+	 * Such a SCP keeps running on its own clock and power setup, and its
+	 * sleep handshake with the SPM and the PMIC is not implemented: refuse
+	 * to suspend until it is detached.
+	 */
+	if (rproc->state == RPROC_ATTACHED) {
+		dev_warn(dev, "SCP is running, detach it before suspend\n");
+		return -EBUSY;
+	}
+
+	/*
 	 * Only unprepare if the SCP is running and holding the clock.
 	 *
 	 * Note: `scp_ops` doesn't implement .attach() callback, hence
-	 * `rproc->state` can never be RPROC_ATTACHED.  Otherwise, it
-	 * should also be checked here.
+	 * `rproc->state` can only be RPROC_ATTACHED with the MT6785 ops
+	 * (handled above).
 	 */
 	if (rproc->state == RPROC_RUNNING)
 		clk_unprepare(scp->clk);

@@ -116,6 +116,71 @@ EXPORT_SYMBOL_GPL(scp_memcpy_aligned);
  *
  * Note: This should not be used by drivers other than mtk_scp.
  */
+/**
+ * scp_ipi_payload() - payload address of a share object in SCP SRAM
+ *
+ * @scp:	mtk_scp structure
+ * @obj:	receive or send object
+ *
+ * Some firmwares keep reserved bytes between the len field and the payload.
+ *
+ * Return: address of the first payload byte
+ */
+void __iomem *scp_ipi_payload(struct mtk_scp *scp, struct mtk_share_obj __iomem *obj)
+{
+	return (void __iomem *)&obj->share_buf +
+	       scp->data->scp_sizes->ipi_share_buffer_reserved;
+}
+EXPORT_SYMBOL_GPL(scp_ipi_payload);
+
+/**
+ * scp_awake_get() - keep the SCP awake for AP accesses to its SRAM
+ *
+ * @scp:	mtk_scp structure
+ *
+ * Counted; a no-op on SCPs without wake handshake. Sleeps.
+ *
+ * Return: 0 on success, negative error code if the SCP did not answer
+ */
+int scp_awake_get(struct mtk_scp *scp)
+{
+	int ret = 0;
+
+	if (!scp->data->scp_awake)
+		return 0;
+
+	mutex_lock(&scp->awake_lock);
+	if (scp->awake_count == 0)
+		ret = scp->data->scp_awake(scp, true);
+	if (ret)
+		scp->awake_fail++;
+	else
+		scp->awake_count++;
+	mutex_unlock(&scp->awake_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(scp_awake_get);
+
+/**
+ * scp_awake_put() - release a scp_awake_get() reference
+ *
+ * @scp:	mtk_scp structure
+ */
+void scp_awake_put(struct mtk_scp *scp)
+{
+	if (!scp->data->scp_awake)
+		return;
+
+	mutex_lock(&scp->awake_lock);
+	if (!WARN_ON(scp->awake_count == 0) && --scp->awake_count == 0) {
+		if (scp->data->scp_awake(scp, false))
+			scp->awake_fail++;
+	}
+	mutex_unlock(&scp->awake_lock);
+}
+EXPORT_SYMBOL_GPL(scp_awake_put);
+
 void scp_ipi_lock(struct mtk_scp *scp, u32 id)
 {
 	if (WARN_ON(id >= SCP_IPI_MAX))
@@ -160,7 +225,7 @@ int scp_ipi_send(struct mtk_scp *scp, u32 id, const void *buf, unsigned int len,
 		 unsigned int wait)
 {
 	struct mtk_share_obj __iomem *send_obj = scp->send_buf;
-	u32 val;
+	u32 val, busy;
 	int ret;
 	const struct mtk_scp_sizes_data *scp_sizes;
 
@@ -177,20 +242,31 @@ int scp_ipi_send(struct mtk_scp *scp, u32 id, const void *buf, unsigned int len,
 		return ret;
 	}
 
+	busy = scp->data->host_to_scp_busy_mask ?: ~0U;
+
 	mutex_lock(&scp->send_lock);
 
-	 /* Wait until SCP receives the last command */
-	ret = readl_poll_timeout_atomic(scp->cluster->reg_base + scp->data->host_to_scp_reg,
-					val, !val, 0, SCP_TIMEOUT_US);
+	ret = scp_awake_get(scp);
 	if (ret) {
-		dev_err(scp->dev, "%s: IPI timeout!\n", __func__);
+		dev_err(scp->dev, "%s: SCP does not wake up\n", __func__);
 		goto unlock_mutex;
 	}
 
-	scp_memcpy_aligned(&send_obj->share_buf, buf, len);
+	 /* Wait until SCP receives the last command */
+	ret = readl_poll_timeout_atomic(scp->cluster->reg_base + scp->data->host_to_scp_reg,
+					val, !(val & busy), 0, SCP_TIMEOUT_US);
+	if (ret) {
+		dev_err(scp->dev, "%s: IPI timeout!\n", __func__);
+		scp->ipi_tx_timeout++;
+		goto awake_put;
+	}
+
+	scp_memcpy_aligned(scp_ipi_payload(scp, send_obj), buf, len);
 
 	writel(len, &send_obj->len);
 	writel(id, &send_obj->id);
+	scp->ipi_tx_count++;
+	scp->ipi_last_tx_id = id;
 
 	scp->ipi_id_ack[id] = false;
 	/* send the command to SCP */
@@ -209,6 +285,8 @@ int scp_ipi_send(struct mtk_scp *scp, u32 id, const void *buf, unsigned int len,
 			ret = 0;
 	}
 
+awake_put:
+	scp_awake_put(scp);
 unlock_mutex:
 	mutex_unlock(&scp->send_lock);
 	clk_disable(scp->clk);
