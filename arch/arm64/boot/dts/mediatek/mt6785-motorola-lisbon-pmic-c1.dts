@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with the MT6360 read-only: MT6360 core (interrupt masks) and ADC,
+ * MT6359 AUXADC, battery NTC, adc-battery. The charger node stays disabled, so no charger register
+ * is written.
+ */
+
+#include "mt6785-motorola-lisbon-pmic.dts"
+#include "mt6785-motorola-lisbon-charger.dtsi"
+
+&mt6360_chg {
+	status = "disabled";
+};
+
+/* no supplier for the battery status without the charger driver */
+/ {
+	fuel-gauge {
+		/delete-property/ power-supplies;
+	};
+};

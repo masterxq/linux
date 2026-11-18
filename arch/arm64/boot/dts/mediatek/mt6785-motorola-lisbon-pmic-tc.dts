@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Motorola Moto G60s (lisbon) with touchscreen and charger. */
+
+#include "mt6785-motorola-lisbon-pmic.dts"
+#include "mt6785-motorola-lisbon-touch.dtsi"
+#include "mt6785-motorola-lisbon-charger.dtsi"

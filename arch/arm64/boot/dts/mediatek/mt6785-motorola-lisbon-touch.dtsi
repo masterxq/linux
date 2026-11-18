@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): touchscreen = touch part of the Tianma ILI7807S TDDI panel on SPI3.
+ *
+ *  - SPI3, CS 0, 10 MHz, pad-select 0
+ *  - SPI3 pins = pad A (GPIO150 MO, 153 CSB, 165 CLK, 166 MI, mode 1)
+ *  - IRQ GPIO1/EINT1 falling edge, pull-up
+ *  - touch reset GPIO2, pulse high-low (5 ms)-high
+ *  - supply VTP = MT6360 LDO2, 3.3 V, always on
+ *  - firmware ILITEK_FW_120hz for this panel
+ *
+ * Not touched: GPIO44 (LCM reset), GPIO88 (display LDO enable), GPIO32 (MT6382 reset). No
+ * vdd-supply: VTP stays on as left by the bootloader.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/mediatek,mt6785-pinfunc.h>
+
+&pio {
+	spi3_pins: spi3-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO150__FUNC_SPI3_A_MO>,
+				 <PINMUX_GPIO153__FUNC_SPI3_A_CSB>,
+				 <PINMUX_GPIO165__FUNC_SPI3_A_CLK>,
+				 <PINMUX_GPIO166__FUNC_SPI3_A_MI>;
+		};
+	};
+
+	touchscreen_pins: touchscreen-pins {
+		pins-interrupt {
+			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>;
+			bias-pull-up;
+			input-enable;
+		};
+
+		pins-reset {
+			pinmux = <PINMUX_GPIO2__FUNC_GPIO2>;
+		};
+	};
+};
+
+&spi3 {
+	mediatek,pad-select = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi3_pins>;
+	status = "okay";
+
+	touchscreen@0 {
+		compatible = "ilitek,ili7807s";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+
+		interrupts-extended = <&pio 1 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&pio 2 GPIO_ACTIVE_LOW>;
+
+		firmware-name = "ilitek/ILITEK_FW_120hz";
+
+		touchscreen-size-x = <1080>;
+		touchscreen-size-y = <2460>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&touchscreen_pins>;
+	};
+};

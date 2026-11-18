@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Motorola Moto G60s (lisbon) with the MT6359 PMIC and the touchscreen (SPI3). */
+
+#include "mt6785-motorola-lisbon-pmic.dts"
+#include "mt6785-motorola-lisbon-touch.dtsi"
