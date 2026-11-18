@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): wake-up sources for system suspend.
+ *
+ * The RTC alarm of the MT6359 wakes the system without DT help (mt6397-rtc marks itself wakeup
+ * capable; the PMIC interrupt EINT is a wake IRQ). The power key becomes a wake-up source here; it
+ * only takes effect while mtk-pmic-keys is bound.
+ */
+
+&pmic {
+	keys {
+		power-key {
+			wakeup-source;
+		};
+	};
+};
