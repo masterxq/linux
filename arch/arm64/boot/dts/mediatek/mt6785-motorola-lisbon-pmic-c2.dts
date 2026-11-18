@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with a conservative MT6360 charger setup (CV 4.45 V, ICHG 1 A, AICR
+ * 700 mA, IEOC 250 mA, timer 12 h, charging only between 0 and 45 degC).
+ */
+
+#include "mt6785-motorola-lisbon-pmic.dts"
+#include "mt6785-motorola-lisbon-charger.dtsi"
