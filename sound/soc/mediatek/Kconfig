@@ -56,6 +56,19 @@ config SND_SOC_MT6797_MT6351
 	  Select Y if you have such device.
 	  If unsure select "N".
 
+config SND_SOC_MT6785
+	tristate "ASoC support for Mediatek MT6785 chip"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on COMMON_CLK
+	select SND_SOC_MEDIATEK
+	select MFD_SYSCON
+	help
+	  This adds the ASoC platform (AFE) driver for the Mediatek MT6785
+	  (Helio G90/G95) audio front end: memory interfaces and the ADDA
+	  link to the MT6359 PMIC codec.
+	  Select Y if you have such device.
+	  If unsure select "N".
+
 config SND_SOC_MT7986
 	tristate "ASoC support for Mediatek MT7986 chip"
 	depends on ARCH_MEDIATEK
