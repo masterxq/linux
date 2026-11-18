@@ -128,6 +128,11 @@ properties:
     $ref: /schemas/iio/adc/mediatek,mt6359-auxadc.yaml#
     unevaluatedProperties: false
 
+  fuel-gauge:
+    type: object
+    $ref: /schemas/power/supply/mediatek,mt6359-gauge.yaml#
+    unevaluatedProperties: false
+
   accdet:
     type: object
     description:
