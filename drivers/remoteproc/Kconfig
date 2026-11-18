@@ -75,6 +75,35 @@ config MTK_SCP
 
 	  It's safe to say N here.
 
+config LISBON_SCP_HUB
+	tristate "lisbon: MT6785 SCP sensor hub protocol and diagnostics"
+	depends on MTK_SCP && ARM_ARCH_TIMER
+	select AUXILIARY_BUS
+	select CRC32
+	help
+	  Sensor hub driver for the Motorola Moto G60s (lisbon). Binds to the
+	  sensor hub node of the MT6785 SCP, starts the SCP and talks to its
+	  sensor hub firmware: asks which chips it drives, hands it the
+	  sensor FIFO in the shared DRAM region, syncs its time base, enables
+	  sensors on request and keeps their newest samples. Adds an
+	  auxiliary device for the IIO devices. Shows the SCP state, its IPI
+	  counters and its log in debugfs and detaches the SCP before system
+	  suspend.
+
+	  If unsure say N.
+
+config LISBON_SCP_IIO
+	tristate "lisbon: IIO devices for the MT6785 SCP sensor hub"
+	depends on LISBON_SCP_HUB && IIO
+	help
+	  IIO driver for the Motorola Moto G60s (lisbon). Accelerometer,
+	  gyroscope, magnetometer, light and proximity sensor behind the SCP
+	  sensor hub as IIO devices with raw values and scales, read on
+	  demand (for iio-sensor-proxy). Binds to the auxiliary device of
+	  the sensor hub driver.
+
+	  If unsure say N.
+
 config OMAP_REMOTEPROC
 	tristate "OMAP remoteproc support"
 	depends on ARCH_OMAP4 || SOC_OMAP5 || SOC_DRA7XX
