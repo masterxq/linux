@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): LCD backlight AW99703 on I2C6 @ 0x36.
+ *
+ * The bootloader configures and enables the backlight; the aw99703 driver only takes that state
+ * over (no register write at probe) and changes the brightness on sysfs writes only.
+ *  - I2C6 pinmux = function 1 on GPIO45 (SCL6) / GPIO46 (SDA6), the pins the bootloader uses for
+ *    the backlight and the bias chip; no bias/drive settings here, so the bootloader pad setup
+ *    stays
+ *  - 100 kHz: the vendor DT sets no clock-frequency for i2c6
+ *  - enable-gpios (HWEN, GPIO22) documents the hardware; the driver never requests it
+ *  - nothing else on I2C6 is described (bias chip @0x3e, speaker amp @0x34 stay untouched)
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/mediatek,mt6785-pinfunc.h>
+
+&pio {
+	i2c6_pins: i2c6-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO45__FUNC_SCL6>,
+				 <PINMUX_GPIO46__FUNC_SDA6>;
+		};
+	};
+};
+
+&i2c6 {
+	clock-frequency = <100000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c6_pins>;
+	status = "okay";
+
+	lisbon_backlight: backlight@36 {
+		compatible = "awinic,aw99703";
+		reg = <0x36>;
+		enable-gpios = <&pio 22 GPIO_ACTIVE_HIGH>;
+	};
+};

@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) base description plus the MT6382 bridge on SPI1 (read-only takeover).
+ */
+
+#include "mt6785-motorola-lisbon-m1.dts"
+#include "mt6785-motorola-lisbon-mt6382.dtsi"

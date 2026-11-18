@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): MT6382 MIPI-DSI bridge on SPI1, read-only takeover.
+ *
+ * The bootloader brings up the bridge and the panel completely; Linux shows the boot framebuffer
+ * through simpledrm. This node only lets the mt6382 driver read bridge registers over SPI1. Nothing
+ * here may change the running display path:
+ *  - no clocks/power-domains/supplies on the bridge node: XO_EXTBUF3 (26 MHz, MT6359 clock buffer)
+ *    and the bridge rails stay as the bootloader left them; no consumer can switch them off
+ *  - reset-gpios (GPIO32) documents the hardware for the binding; the driver does not request it in
+ *    takeover mode, so neither direction nor level nor pin mode of GPIO32 is touched
+ *  - SPI1 pinmux = function 1 on GPIO47..50 (pad A): the same mux the bootloader uses to talk to
+ *    the bridge. No drive-strength/bias here, so the bootloader pad settings stay. These pins carry
+ *    only the SPI1 bus; DSI and the bridge clock are on other pins.
+ *  - SPI1 controller: clocks MAINPLL_D5_D2 / top_spi / infra SPI1, pad-select 0
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/mediatek,mt6785-pinfunc.h>
+
+&pio {
+	spi1_pins: spi1-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO47__FUNC_SPI1_A_MI>,
+				 <PINMUX_GPIO48__FUNC_SPI1_A_CSB>,
+				 <PINMUX_GPIO49__FUNC_SPI1_A_MO>,
+				 <PINMUX_GPIO50__FUNC_SPI1_A_CLK>;
+		};
+	};
+};
+
+&spi1 {
+	mediatek,pad-select = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi1_pins>;
+	status = "okay";
+
+	mt6382: bridge@0 {
+		compatible = "mediatek,mt6382";
+		reg = <0>;
+		/* 55 MHz as in the vendor DT; the driver starts at 6.5 MHz */
+		spi-max-frequency = <55000000>;
+		/* LSB first, as set up by the vendor driver; the driver forces it as well */
+		spi-lsb-first;
+		/* reset pulse 1-0-1; not requested in takeover mode */
+		reset-gpios = <&pio 32 GPIO_ACTIVE_LOW>;
+	};
+};
