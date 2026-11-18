@@ -173,6 +173,7 @@ int panfrost_gem_open(struct drm_gem_object *obj, struct drm_file *file_priv)
 	struct panfrost_gem_object *bo = to_panfrost_bo(obj);
 	unsigned long color = bo->noexec ? PANFROST_BO_NOEXEC : 0;
 	struct panfrost_file_priv *priv = file_priv->driver_priv;
+	struct panfrost_device *pfdev = to_panfrost_device(obj->dev);
 	struct panfrost_gem_mapping *mapping;
 
 	mapping = kzalloc_obj(*mapping);
@@ -209,10 +210,30 @@ int panfrost_gem_open(struct drm_gem_object *obj, struct drm_file *file_priv)
 			goto err;
 	}
 
+	dma_resv_lock(obj->resv, NULL);
+	mutex_lock(&pfdev->shrinker_lock);
 	mutex_lock(&bo->mappings.lock);
-	WARN_ON(bo->base.madv != PANFROST_MADV_WILLNEED);
-	list_add_tail(&mapping->node, &bo->mappings.list);
+	if (bo->base.madv < 0) {
+		/* Purged, the content is gone for every user. */
+		ret = -EINVAL;
+	} else {
+		/*
+		 * panfrost_ioctl_madvise() only lets a BO become purgeable
+		 * while the caller's FD is its only user. Userspace may still
+		 * share a purgeable BO, e.g. by exporting it and importing it
+		 * through PRIME in another FD. From now on the BO has more
+		 * than one user, so it must not stay purgeable.
+		 */
+		if (bo->base.madv == PANFROST_MADV_DONTNEED) {
+			drm_gem_shmem_madvise_locked(&bo->base,
+						     PANFROST_MADV_WILLNEED);
+			list_del_init(&bo->base.madv_list);
+		}
+		list_add_tail(&mapping->node, &bo->mappings.list);
+	}
 	mutex_unlock(&bo->mappings.lock);
+	mutex_unlock(&pfdev->shrinker_lock);
+	dma_resv_unlock(obj->resv);
 
 err:
 	if (ret)
