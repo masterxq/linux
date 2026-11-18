@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): GNSS function of the consys.
+ *
+ * External LNA enable on GPIO155, driven by the host: low at init, high while GNSS runs, low when
+ * stopped. Co-clock mode (co_clock_flag=1). Without the mtk-connac1-gps driver nothing touches the
+ * pin.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+&gnss {
+	lna-gpios = <&pio 155 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+};
