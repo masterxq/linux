@@ -500,7 +500,13 @@ static int panfrost_ioctl_madvise(struct drm_device *dev, void *data,
 		 * visible/shared BOs are likely to never be marked purgeable
 		 * anyway, so let's not bother.
 		 */
+		/*
+		 * An exported BO is visible outside of this FD even if no
+		 * other FD has imported it yet, and the shrinker never purges
+		 * it (drm_gem_shmem_is_purgeable()). Keep it WILLNEED.
+		 */
 		if (!list_is_singular(&bo->mappings.list) ||
+		    bo->base.base.dma_buf ||
 		    WARN_ON_ONCE(first->mmu != priv->mmu)) {
 			ret = -EINVAL;
 			goto out_unlock_mappings;
