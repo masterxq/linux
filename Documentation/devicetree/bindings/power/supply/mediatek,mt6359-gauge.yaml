@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/mediatek,mt6359-gauge.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6359 PMIC fuel gauge
+
+maintainers:
+  - Matthias Brugger <matthias.bgg@gmail.com>
+
+description:
+  The fuel gauge block (FGADC) of the MT6359 PMIC measures the battery
+  current over an external sense resistor and integrates it in a coulomb
+  counter. Together with the battery voltage and temperature from IIO
+  channels and the data of the monitored battery it forms the battery
+  power supply. The node is a child of the MT6359 PMIC node.
+
+allOf:
+  - $ref: power-supply.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6359-gauge
+
+  io-channels:
+    minItems: 1
+    items:
+      - description: battery voltage
+      - description: battery temperature
+
+  io-channel-names:
+    minItems: 1
+    items:
+      - const: voltage
+      - const: temperature
+
+  monitored-battery: true
+
+  shunt-resistor-micro-ohms:
+    description:
+      Effective resistance of the current sense resistor, including any
+      board specific correction of the gauge gain.
+    default: 5000
+
+required:
+  - compatible
+  - io-channels
+  - io-channel-names
+  - monitored-battery
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/iio/adc/mediatek,mt6359-auxadc.h>
+
+    fuel-gauge {
+        compatible = "mediatek,mt6359-gauge";
+        io-channels = <&pmic_adc MT6359_AUXADC_BATADC>, <&battery_ntc>;
+        io-channel-names = "voltage", "temperature";
+        monitored-battery = <&battery>;
+        power-supplies = <&charger>;
+        shunt-resistor-micro-ohms = <5263>;
+    };
