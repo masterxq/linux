@@ -45,6 +45,15 @@ config MTK_INFRACFG
 	  INFRACFG controller contains various infrastructure registers not
 	  directly associated to any device.
 
+config MTK_LISBON_SPM
+	tristate "MT6785 SPM firmware diagnostics (lisbon)"
+	depends on ARCH_MEDIATEK && ARM64 && DEBUG_FS
+	depends on HAVE_ARM_SMCCC
+	help
+	  Shows in debugfs whether the vendor TF-A on MT6785 has the SPM
+	  firmware loaded and started, and allows starting the SPM firmware
+	  ("kick") by hand. Debugging aid for system suspend; say N if unsure.
+
 config MTK_PMIC_WRAP
 	tristate "MediaTek PMIC Wrapper Support"
 	depends on RESET_CONTROLLER
@@ -88,5 +97,14 @@ config MTK_SOCINFO
 	  The MediaTek SoC Information (mtk-socinfo) driver provides
 	  information about the SoC to the userspace including the
 	  manufacturer name, marketing name and soc name.
+
+config MTK_CPU_SIP
+	bool "MediaTek legacy TF-A CPU power-down SiP call after hotplug"
+	depends on ARM64 && HAVE_ARM_SMCCC
+	help
+	  After a CPU went offline through PSCI CPU_OFF, issue the vendor SiP
+	  call MTK_SIP_POWER_DOWN_CORE like the MT6785 vendor kernel does.
+	  Only active on MT6785 and only while the run-time parameter
+	  mtk_cpu_sip.power_down_core is set. Debugging aid; say N if unsure.
 
 endmenu
