@@ -1727,6 +1727,8 @@ patternProperties:
     description: Tronsmart
   "^truly,.*":
     description: Truly Semiconductors Limited
+  "^trustonic,.*":
+    description: Trustonic Limited
   "^tsd,.*":
     description: Theobroma Systems Design und Consulting GmbH
   "^turing,.*":

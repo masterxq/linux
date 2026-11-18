@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/arm/firmware/trustonic,mobicore.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Trustonic MobiCore trusted execution environment
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  Trusted execution environment in the secure world of the SoC, reached with secure
+  monitor calls. The node only carries the interrupt with which the secure world
+  notifies the normal world. Compatible string and interrupt follow the vendor kernel
+  device tree.
+
+properties:
+  compatible:
+    const: trustonic,mobicore
+
+  interrupts:
+    maxItems: 1
+
+required:
+  - compatible
+  - interrupts
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    mobicore {
+        compatible = "trustonic,mobicore";
+        interrupts = <GIC_SPI 89 IRQ_TYPE_EDGE_RISING>;
+    };
