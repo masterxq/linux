@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): USB Type-C on the MT6360 port controller (I2C5 0x4e).
+ *  - sink with USB PD, fixed 5 V / 3 A or 9 V / 2.22 A (about 20 W); the charger input current and
+ *    MIVR follow the contract (mediatek,input-source)
+ *  - source 5 V / 1.5 A from the MT6360 OTG boost, USB host through the MTU3 role switch (device
+ *    role whenever nothing else is attached)
+ * The port driver (tcpci_mt6360) is a module; without it the MTU3 stays in the device role and the
+ * charger keeps its defaults.
+ *
+ *  - PD_IRQB on GPIO7, EINT7 falling edge, GPIO7 input with pull-up
+ *  - vendor PD data: source PDO 5 V / 1.5 A, sink PDO 5 V / 3 A; the 9 V sink PDO is added here.
+ *    The charger also runs at 9 V and 12 V with the vendor fast charging protocol (input current
+ *    3.2 A).
+ *  - OTG over-current threshold: the next step above the requested current, 1.8 A for the 1.5 A of
+ *    the source PDO
+ *  - input over-voltage protection: the 11 V step, enough for a 9 V contract (the vendor uses 14.5
+ *    V for its fast charging protocol)
+ * Not described: the water detection on GPIO5, the USB 3 lanes (mux not described, USB 3 stays
+ * off).
+ */
+
+#include <dt-bindings/usb/pd.h>
+
+&mt6360_pins {
+	pins-pd-irq {
+		pinmux = <PINMUX_GPIO7__FUNC_GPIO7>;
+		input-enable;
+		bias-pull-up;
+	};
+};
+
+&mt6360 {
+	mt6360_tcpc: tcpc {
+		compatible = "mediatek,mt6360-tcpc";
+		interrupts-extended = <&pio 7 IRQ_TYPE_EDGE_FALLING>;
+		interrupt-names = "PD_IRQB";
+		vbus-supply = <&mt6360_otg_vbus>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			data-role = "dual";
+			power-role = "dual";
+			try-power-role = "sink";
+			source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_DUAL_ROLE |
+							PDO_FIXED_DATA_SWAP |
+							PDO_FIXED_USB_COMM)>;
+			sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+						      PDO_FIXED_DATA_SWAP |
+						      PDO_FIXED_USB_COMM)
+				     PDO_FIXED(9000, 2220, 0)>;
+			op-sink-microwatt = <15000000>;
+
+			port {
+				typec_con_hs: endpoint {
+					remote-endpoint = <&mtu3_hs_role_sw>;
+				};
+			};
+		};
+	};
+};
+
+&mt6360_chg {
+	richtek,vinovp-microvolt = <11000000>;
+	mediatek,input-source = <&mt6360_tcpc>;
+
+	mt6360_otg_vbus: usb-otg-vbus-regulator {
+		regulator-name = "usb-otg-vbus";
+		regulator-min-microamp = <500000>;
+		regulator-max-microamp = <1800000>;
+	};
+};
+
+&ssusb {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+
+	port {
+		mtu3_hs_role_sw: endpoint {
+			remote-endpoint = <&typec_con_hs>;
+		};
+	};
+};
+
+&xhci {
+	vusb33-supply = <&mt6359_vusb_ldo_reg>;
+	status = "okay";
+};

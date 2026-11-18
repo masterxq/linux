@@ -12,3 +12,4 @@
 #include "mt6785-motorola-lisbon-haptic.dtsi"
 #include "mt6785-motorola-lisbon-keypad.dtsi"
 #include "mt6785-motorola-lisbon-ntc.dtsi"
+#include "mt6785-motorola-lisbon-typec.dtsi"
