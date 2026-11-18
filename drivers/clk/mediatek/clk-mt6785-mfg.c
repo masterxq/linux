@@ -5,6 +5,7 @@
 
 #include <dt-bindings/clock/mediatek,mt6785-clk.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 
 #include "clk-gate.h"
 #include "clk-mtk.h"
@@ -35,9 +36,42 @@ static const struct of_device_id of_match_clk_mt6785_mfg[] = {
 };
 MODULE_DEVICE_TABLE(of, of_match_clk_mt6785_mfg);
 
+/*
+ * The controller sits in the MFG power domain. If the clock core resumes it
+ * on demand, clk_prepare() of the GPU clock takes the genpd lock of MFG under
+ * the clock prepare lock, while powering on MFG (on behalf of a GPU core
+ * domain) holds that genpd lock and prepares the clock of MFG_ASYNC: an ABBA
+ * between prepare_lock and genpd->mlock. Keep the controller resumed while it
+ * is bound, so the clock core only counts usage on an active device and never
+ * calls into genpd under the prepare lock. MFG stayed on before as well while
+ * panfrost holds the GPU clock prepared.
+ */
+static int clk_mt6785_mfg_probe(struct platform_device *pdev)
+{
+	int ret;
+
+	ret = mtk_clk_simple_probe(pdev);
+	if (ret)
+		return ret;
+
+	ret = pm_runtime_resume_and_get(&pdev->dev);
+	if (ret) {
+		mtk_clk_simple_remove(pdev);
+		return dev_err_probe(&pdev->dev, ret, "failed to resume\n");
+	}
+
+	return 0;
+}
+
+static void clk_mt6785_mfg_remove(struct platform_device *pdev)
+{
+	pm_runtime_put(&pdev->dev);
+	mtk_clk_simple_remove(pdev);
+}
+
 static struct platform_driver clk_mt6785_mfg_drv = {
-	.probe = mtk_clk_simple_probe,
-	.remove = mtk_clk_simple_remove,
+	.probe = clk_mt6785_mfg_probe,
+	.remove = clk_mt6785_mfg_remove,
 	.driver = {
 		.name = "clk-mt6785-mfg",
 		.of_match_table = of_match_clk_mt6785_mfg,
