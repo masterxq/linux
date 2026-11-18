@@ -568,6 +568,20 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config LISBON_FPC
+	tristate "Motorola Moto G60s (lisbon) fingerprint sensor controls"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF && GPIOLIB && REGULATOR && COMMON_CLK
+	help
+	  Normal world side of the FPC fingerprint sensor of the Motorola
+	  Moto G60s (lisbon): supply, reset line, interrupt line and the
+	  SPI0 clock, offered below /sys/class/fingerprint/fpc_spi to the
+	  user space client of the vendor trusted application that talks
+	  to the sensor. The SPI bus itself stays with the secure world.
+	  Useful only together with the vendor TEE runtime.
+
+	  If unsure, say N.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
