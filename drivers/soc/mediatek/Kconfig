@@ -17,6 +17,37 @@ config MTK_CMDQ
 	  time limitation, such as updating display configuration during the
 	  vblank.
 
+config MTK_CONNAC1_CONSYS
+	tristate "MediaTek CONNAC1 connectivity subsystem power control"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	depends on MFD_SYSCON && RESET_CONTROLLER && REGULATOR
+	select CRC32
+	select FW_LOADER
+	help
+	  Say yes here to support powering the integrated CONNAC1
+	  connectivity subsystem (WLAN/BT/GPS/FM, "soc1_0") of the MT6785:
+	  supplies, CONN power domain, CONN MCU reset and the RAM patches
+	  in the reserved EMI region, up to the "MCU ready" state. Power-on
+	  is triggered from user space through sysfs; nothing is switched
+	  on at probe time.
+
+config MTK_CONNAC1_GPS
+	tristate "MediaTek CONNAC1 GNSS function (/dev/stpgps)"
+	depends on MTK_CONNAC1_CONSYS
+	depends on GPIOLIB
+	depends on RFKILL || !RFKILL
+	help
+	  Character device /dev/stpgps for the GNSS receiver of the MT6785
+	  connectivity subsystem. It switches the GNSS function on while the
+	  device is open and passes the data stream of the GNSS DSP through,
+	  with the interface of the vendor driver (stp_chrdev_gps). Positions
+	  need a positioning engine in user space; there is no NMEA output in
+	  the kernel. An rfkill switch of type GPS powers the receiver down.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called mtk-connac1-gps.
+
 config MTK_DEVAPC
 	tristate "Mediatek Device APC Support"
 	help
