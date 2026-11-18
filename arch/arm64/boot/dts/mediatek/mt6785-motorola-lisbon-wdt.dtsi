@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): watchdog without the pre-timeout interrupt.
+ *
+ * With the interrupt, mtk_wdt runs the watchdog in dual mode with the pre-timeout ("bark") half-way
+ * through the heartbeat. On this board the bark never reaches Linux (no count on SPI 72, no kernel
+ * message; presumably the secure firmware handles it) and the system resets as soon as it fires:
+ * with a 30 s heartbeat about 15 s after the last ping. A daemon that pings at half the heartbeat,
+ * like systemd, then loses the race.
+ *
+ * Without the interrupt the driver runs the watchdog in single mode and the reset comes after the
+ * full heartbeat.
+ *
+ * In suspend-to-idle the watchdog keeps running, fed by GPT channel 5 (channels 1 to 4 are used by
+ * the vendor kernel): a system that hangs in suspend resets, a long sleep does not.
+ */
+
+&watchdog {
+	/delete-property/ interrupts;
+	mediatek,sleep-timer = <&apxgpt 5>;
+};

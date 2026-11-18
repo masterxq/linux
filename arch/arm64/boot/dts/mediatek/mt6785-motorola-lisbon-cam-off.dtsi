@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): switch the camera supplies and control lines the bootloader leaves
+ * on to their "off" level at boot.
+ *
+ * The bootloader configures GPIO115, 118, 125, 195 and 197 as GPIO outputs driven high. GPIO195
+ * enables the AVDD LDO of cam2/cam4/cam6, GPIO115 the DVDD LDO of cam4/cam6, GPIO197/118/125 are
+ * the power-down/reset lines of OV02B1B, S5K4H7 and S5K5E9. Left like this, two camera LDOs run
+ * without a consumer and the three sensors sit half powered (DOVDD off) with their control lines
+ * high. The vendor power-off sequences drive every one of these lines low.
+ *
+ * A pinctrl hog on the controller drives them low once, when the pin controller probes: first the
+ * reset/power-down lines, then the two LDO enables (reverse of the power-on order). The MT6785
+ * pinmux ops are not strict, so the hog does not claim the lines in gpiolib and the camera drivers
+ * (regulator-fixed, sensor nodes, lisbon-camera-probe) can still request them. A gpio-hog would
+ * keep them busy (-EBUSY) and is not used for that reason. The MCLK pins stay as the bootloader
+ * left them (CMMCLK function); in GPIO mode the defaults would drive three of them high.
+ */
+
+&pio {
+	pinctrl-names = "default";
+	pinctrl-0 = <&cam_off_ctrl_pins>, <&cam_off_ldo_pins>;
+
+	cam_off_ctrl_pins: cam-off-ctrl-pins {
+		pins-ctrl {
+			pinmux = <PINMUX_GPIO197__FUNC_GPIO197>,
+				 <PINMUX_GPIO118__FUNC_GPIO118>,
+				 <PINMUX_GPIO125__FUNC_GPIO125>;
+			output-low;
+		};
+	};
+
+	cam_off_ldo_pins: cam-off-ldo-pins {
+		pins-ldo {
+			pinmux = <PINMUX_GPIO115__FUNC_GPIO115>,
+				 <PINMUX_GPIO195__FUNC_GPIO195>;
+			output-low;
+		};
+	};
+};
