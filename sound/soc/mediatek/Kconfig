@@ -69,6 +69,18 @@ config SND_SOC_MT6785
 	  Select Y if you have such device.
 	  If unsure select "N".
 
+config SND_SOC_MT6785_MT6359
+	tristate "ASoC Audio driver for MT6785 with MT6359 codec"
+	depends on SND_SOC_MT6785 && MTK_PMIC_WRAP
+	depends on SND_SOC_MT6359_ACCDET || !SND_SOC_MT6359_ACCDET
+	select SND_SOC_MT6359
+	help
+	  This adds the ASoC machine driver for Mediatek MT6785 boards
+	  with the MT6359 PMIC codec (headphone, receiver, analog
+	  microphones, headset detection) and an I2S speaker amplifier.
+	  Select Y if you have such device.
+	  If unsure select "N".
+
 config SND_SOC_MT7986
 	tristate "ASoC support for Mediatek MT7986 chip"
 	depends on ARCH_MEDIATEK
