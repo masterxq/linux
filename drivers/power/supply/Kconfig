@@ -45,6 +45,17 @@ config GENERIC_ADC_BATTERY
 	  Say Y here to enable support for the generic battery driver
 	  which uses IIO framework to read adc.
 
+config BATTERY_MT6359_GAUGE
+	tristate "MediaTek MT6359 fuel gauge"
+	depends on MFD_MT6397 && IIO && OF
+	help
+	  Say Y here to enable the battery power supply of boards with the
+	  MediaTek MT6359 PMIC fuel gauge (FGADC): battery current and
+	  hardware coulomb counter, voltage and temperature from IIO
+	  channels, state of charge from the coulomb counter with a reference
+	  kept in the gauge across reboots, taken from the open circuit
+	  voltage when there is none.
+
 config IP5XXX_POWER
 	tristate "Injoinic IP5xxx power bank IC driver"
 	depends on I2C
