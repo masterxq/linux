@@ -24,6 +24,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/scatterlist.h>
 #include <linux/sched.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/units.h>
 
@@ -41,6 +42,9 @@
 #define I2C_SOFT_RST			0x0001
 #define I2C_HANDSHAKE_RST		0x0020
 #define I2C_FIFO_ADDR_CLR		0x0001
+#define I2C_FIFO_ADDR_CLR_MCH		0x0004
+#define I2C_RESUME_ARBIT		(1 << 1)
+#define I2C_MCU_INTR_EN			0x0001
 #define I2C_DELAY_LEN			0x0002
 #define I2C_ST_START_CON		0x8001
 #define I2C_FS_START_CON		0x1800
@@ -52,6 +56,9 @@
 #define I2C_CHN_CLR_FLAG		0x0000
 #define I2C_RELIABILITY		0x0010
 #define I2C_DMAACK_ENABLE		0x0008
+
+/* channel register of a multi-channel controller, register layout v2 */
+#define I2C_CH_OFFSET_MCU_INTR		0x40
 
 #define I2C_DMA_CON_TX			0x0000
 #define I2C_DMA_CON_RX			0x0001
@@ -297,6 +304,7 @@ struct mtk_i2c {
 	struct clk_bulk_data clocks[I2C_MT65XX_CLK_MAX]; /* clocks for i2c */
 	bool have_pmic;			/* can use i2c pins from PMIC */
 	bool use_push_pull;		/* IO config push-pull mode */
+	u16 ch_offset;			/* AP channel of a multi-channel controller */
 
 	u16 irq_stat;			/* interrupt status */
 	unsigned int clk_src_div;
@@ -542,13 +550,55 @@ MODULE_DEVICE_TABLE(of, mtk_i2c_of_match);
 
 static u16 mtk_i2c_readw(struct mtk_i2c *i2c, enum I2C_REGS_OFFSET reg)
 {
-	return readw(i2c->base + i2c->dev_comp->regs[reg]);
+	return readw(i2c->base + i2c->ch_offset + i2c->dev_comp->regs[reg]);
 }
 
 static void mtk_i2c_writew(struct mtk_i2c *i2c, u16 val,
 			   enum I2C_REGS_OFFSET reg)
 {
+	writew(val, i2c->base + i2c->ch_offset + i2c->dev_comp->regs[reg]);
+}
+
+/* the common (shadow) register window of a multi-channel controller */
+static u16 mtk_i2c_readw_shadow(struct mtk_i2c *i2c, enum I2C_REGS_OFFSET reg)
+{
+	return readw(i2c->base + i2c->dev_comp->regs[reg]);
+}
+
+static void mtk_i2c_writew_shadow(struct mtk_i2c *i2c, u16 val,
+				  enum I2C_REGS_OFFSET reg)
+{
 	writew(val, i2c->base + i2c->dev_comp->regs[reg]);
+}
+
+/*
+ * Multi-channel controller: before the AP channel is set up, the common
+ * window gets the reset and the bus configuration of the AP channel.
+ */
+static void mtk_i2c_init_shadow(struct mtk_i2c *i2c)
+{
+	bool ac = i2c->dev_comp->timing_adjust && i2c->dev_comp->ltiming_adjust;
+	u16 intr_stat;
+
+	mtk_i2c_writew_shadow(i2c, 0, OFFSET_INTR_MASK);
+	intr_stat = mtk_i2c_readw_shadow(i2c, OFFSET_INTR_STAT);
+	mtk_i2c_writew_shadow(i2c, intr_stat, OFFSET_INTR_STAT);
+	mtk_i2c_writew_shadow(i2c, I2C_SOFT_RST, OFFSET_SOFTRESET);
+	mtk_i2c_writew_shadow(i2c, i2c->use_push_pull ? I2C_IO_CONFIG_PUSH_PULL :
+			      I2C_IO_CONFIG_OPEN_DRAIN, OFFSET_IO_CONFIG);
+	mtk_i2c_writew_shadow(i2c, ac ? i2c->ac_timing.htiming : i2c->timing_reg,
+			      OFFSET_TIMING);
+	if (i2c->dev_comp->ltiming_adjust)
+		mtk_i2c_writew_shadow(i2c, ac ? i2c->ac_timing.ltiming : i2c->ltiming_reg,
+				      OFFSET_LTIMING);
+	mtk_i2c_writew_shadow(i2c, ac ? i2c->ac_timing.hs : i2c->high_speed_reg, OFFSET_HS);
+}
+
+/* after an error the AP channel may have to take the bus back from the arbiter */
+static void mtk_i2c_resume_arbit(struct mtk_i2c *i2c, u16 start_reg)
+{
+	if (i2c->ch_offset && (start_reg & I2C_RESUME_ARBIT))
+		mtk_i2c_writew_shadow(i2c, I2C_RESUME_ARBIT, OFFSET_START);
 }
 
 static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
@@ -556,6 +606,9 @@ static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
 	u16 control_reg;
 	u16 intr_stat_reg;
 	u16 ext_conf_val;
+
+	if (i2c->ch_offset)
+		mtk_i2c_init_shadow(i2c);
 
 	mtk_i2c_writew(i2c, I2C_CHN_CLR_FLAG, OFFSET_START);
 	intr_stat_reg = mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
@@ -1000,6 +1053,7 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	u16 start_reg;
 	u16 control_reg;
 	u16 restart_flag = 0;
+	u16 intr_mask;
 	u16 dma_sync = 0;
 	u32 reg_4g_mode;
 	u32 reg_dma_reset;
@@ -1055,11 +1109,18 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
 			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_STAT);
 
-	mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR, OFFSET_FIFO_ADDR_CLR);
+	mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR |
+		       (i2c->ch_offset ? I2C_FIFO_ADDR_CLR_MCH : 0),
+		       OFFSET_FIFO_ADDR_CLR);
 
-	/* Enable interrupt */
-	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
-			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_MASK);
+	/*
+	 * Enable interrupt. A channel of a multi-channel controller reports an
+	 * ACK error only in the status of the completion interrupt.
+	 */
+	intr_mask = restart_flag | I2C_ARB_LOST | I2C_TRANSAC_COMP;
+	if (!i2c->ch_offset)
+		intr_mask |= I2C_HS_NACKERR | I2C_ACKERR;
+	mtk_i2c_writew(i2c, intr_mask, OFFSET_INTR_MASK);
 
 	/* Set transfer and transaction len */
 	if (i2c->op == I2C_MASTER_WRRD) {
@@ -1192,6 +1253,9 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 		if (left_num >= 1)
 			start_reg |= I2C_RS_MUL_CNFG;
 	}
+	if (i2c->ch_offset)
+		writew(I2C_MCU_INTR_EN,
+		       i2c->base + i2c->ch_offset + I2C_CH_OFFSET_MCU_INTR);
 	mtk_i2c_writew(i2c, start_reg, OFFSET_START);
 
 	ret = wait_for_completion_timeout(&i2c->msg_complete,
@@ -1224,13 +1288,16 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	if (ret == 0) {
 		dev_dbg(i2c->dev, "addr: %x, transfer timeout\n", msgs->addr);
 		i2c_dump_register(i2c);
+		start_reg = mtk_i2c_readw(i2c, OFFSET_START);
 		mtk_i2c_init_hw(i2c);
+		mtk_i2c_resume_arbit(i2c, start_reg);
 		return -ETIMEDOUT;
 	}
 
 	if (i2c->irq_stat & (I2C_HS_NACKERR | I2C_ACKERR)) {
 		dev_dbg(i2c->dev, "addr: %x, transfer ACK error\n", msgs->addr);
 		mtk_i2c_init_hw(i2c);
+		mtk_i2c_resume_arbit(i2c, I2C_RESUME_ARBIT);
 		return -ENXIO;
 	}
 
@@ -1360,6 +1427,7 @@ static const struct i2c_algorithm mtk_i2c_algorithm = {
 
 static int mtk_i2c_parse_dt(struct device_node *np, struct mtk_i2c *i2c)
 {
+	u32 ch_offset;
 	int ret;
 
 	ret = of_property_read_u32(np, "clock-frequency", &i2c->speed_hz);
@@ -1376,6 +1444,13 @@ static int mtk_i2c_parse_dt(struct device_node *np, struct mtk_i2c *i2c)
 	i2c->have_pmic = of_property_read_bool(np, "mediatek,have-pmic");
 	i2c->use_push_pull =
 		of_property_read_bool(np, "mediatek,use-push-pull");
+
+	if (!of_property_read_u32(np, "mediatek,channel-offset", &ch_offset)) {
+		if (!ch_offset || ch_offset > SZ_2K || ch_offset % 0x100 ||
+		    i2c->dev_comp->regs != mt_i2c_regs_v2)
+			return -EINVAL;
+		i2c->ch_offset = ch_offset;
+	}
 
 	i2c_parse_fw_timings(i2c->dev, &i2c->timing_info, true);
 
@@ -1458,6 +1533,25 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 		speed_clk = I2C_MT65XX_CLK_PMIC;
 	} else {
 		speed_clk = I2C_MT65XX_CLK_MAIN;
+	}
+
+	/*
+	 * Optional supply of the SCL/SDA pull-ups, on during each transfer.
+	 * Ask the regulator core only if the bus node itself names the supply:
+	 * the lookup also searches the child nodes, and a "vbus-supply" of a
+	 * client (e.g. a Type-C port controller supplied by a regulator of a
+	 * PMIC on this very bus) would defer the probe of the bus forever.
+	 */
+	if (of_property_present(pdev->dev.of_node, "vbus-supply")) {
+		i2c->adap.bus_regulator =
+			devm_regulator_get_optional(&pdev->dev, "vbus");
+		if (IS_ERR(i2c->adap.bus_regulator)) {
+			ret = PTR_ERR(i2c->adap.bus_regulator);
+			if (ret != -ENODEV)
+				return dev_err_probe(&pdev->dev, ret,
+						     "cannot get the bus supply\n");
+			i2c->adap.bus_regulator = NULL;
+		}
 	}
 
 	strscpy(i2c->adap.name, I2C_DRV_NAME, sizeof(i2c->adap.name));
