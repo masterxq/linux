@@ -572,6 +572,30 @@ static void media_device_release(struct media_devnode *devnode)
 	dev_dbg(devnode->parent, "Media device released\n");
 }
 
+/*
+ * An ancillary link lives only in the link list of its primary entity, with
+ * no backlink in the ancillary entity: drop the ones pointing to @entity.
+ */
+static void media_device_remove_ancillary_links(struct media_device *mdev,
+						struct media_entity *entity)
+{
+	struct media_entity *primary;
+	struct media_link *link, *tmp;
+
+	list_for_each_entry(primary, &mdev->entities, graph_obj.list) {
+		list_for_each_entry_safe(link, tmp, &primary->links, list) {
+			if ((link->flags & MEDIA_LNK_FL_LINK_TYPE) !=
+			    MEDIA_LNK_FL_ANCILLARY_LINK ||
+			    link->gobj1 != &entity->graph_obj)
+				continue;
+
+			list_del(&link->list);
+			media_gobj_destroy(&link->graph_obj);
+			kfree(link);
+		}
+	}
+}
+
 static void __media_device_unregister_entity(struct media_entity *entity)
 {
 	struct media_device *mdev = entity->graph_obj.mdev;
@@ -588,6 +612,9 @@ static void __media_device_unregister_entity(struct media_entity *entity)
 				__media_remove_intf_link(link);
 		}
 	}
+
+	/* Remove all ancillary links pointing to this entity */
+	media_device_remove_ancillary_links(mdev, entity);
 
 	/* Remove all data links that belong to this entity */
 	__media_entity_remove_links(entity);
