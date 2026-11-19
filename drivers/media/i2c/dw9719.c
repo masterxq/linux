@@ -11,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/types.h>
 
@@ -22,6 +23,7 @@
 #define DW9719_MAX_FOCUS_POS	1023
 #define DW9719_CTRL_STEPS	16
 #define DW9719_CTRL_DELAY_US	1000
+#define DW9719_SETTLE_TRIES	50
 
 #define DW9718S_PD			CCI_REG8(0)
 
@@ -45,6 +47,7 @@
 #define DW9719_INFO			CCI_REG8(0)
 #define DW9719_ID			0xF1
 #define DW9761_ID			0xF4
+#define DW9800V_ID			0xEB
 
 #define DW9719_CONTROL			CCI_REG8(2)
 #define DW9719_STANDBY			0x00
@@ -71,6 +74,8 @@
 #define DW9800K_DEFAULT_SAC		1
 #define DW9800K_MODE_SAC_SHIFT		6
 #define DW9800K_DEFAULT_VCM_FREQ		0x10
+#define DW9800K_VCM_CURRENT_HI		CCI_REG8(3)
+#define DW9800K_VCM_CURRENT_LO		CCI_REG8(4)
 
 #define to_dw9719_device(x) container_of(x, struct dw9719_device, sd)
 
@@ -79,6 +84,7 @@ enum dw9719_model {
 	DW9719,
 	DW9761,
 	DW9800K,
+	DW9800V,
 };
 
 struct dw9719_device {
@@ -128,8 +134,8 @@ static int dw9719_power_up(struct dw9719_device *dw9719, bool detect)
 	 * at least on the DW9718S as found on the motorola-nora smartphone,
 	 * then retry the write.
 	 */
-	cci_write(dw9719->regmap, reg_pwr, DW9719_STANDBY, NULL);
-	/* the jiggle is expected to fail, don't even log that as error */
+	/* the jiggle is expected to fail: plain regmap, cci_write() logs it */
+	regmap_write(dw9719->regmap, CCI_REG_ADDR(reg_pwr), DW9719_STANDBY);
 	fsleep(200);
 	cci_write(dw9719->regmap, reg_pwr, DW9719_STANDBY, &ret);
 
@@ -144,13 +150,30 @@ static int dw9719_power_up(struct dw9719_device *dw9719, bool detect)
 			dw9719->sac_mode = DW9800K_DEFAULT_SAC;
 			dw9719->vcm_freq = DW9800K_DEFAULT_VCM_FREQ;
 			goto props;
+		case DW9800V:
+			/* Same register layout as the DW9800K, but with ID */
+			ret = cci_read(dw9719->regmap, DW9719_INFO, &val, NULL);
+			if (ret < 0)
+				goto out;
+
+			if (val != DW9800V_ID) {
+				dev_err(dw9719->dev,
+					"Error unexpected device id 0x%02llx\n",
+					val);
+				ret = -ENXIO;
+				goto out;
+			}
+
+			dw9719->sac_mode = DW9800K_DEFAULT_SAC;
+			dw9719->vcm_freq = DW9800K_DEFAULT_VCM_FREQ;
+			goto props;
 		default:
 			break;
 		}
 
 		ret = cci_read(dw9719->regmap, DW9719_INFO, &val, NULL);
 		if (ret < 0)
-			return ret;
+			goto out;
 
 		switch (val) {
 		case DW9719_ID:
@@ -168,7 +191,8 @@ static int dw9719_power_up(struct dw9719_device *dw9719, bool detect)
 		default:
 			dev_err(dw9719->dev,
 				"Error unknown device id 0x%02llx\n", val);
-			return -ENXIO;
+			ret = -ENXIO;
+			goto out;
 		}
 
 props:
@@ -189,6 +213,7 @@ props:
 
 	switch (dw9719->model) {
 	case DW9800K:
+	case DW9800V:
 		cci_write(dw9719->regmap, DW9719_CONTROL, DW9719_ENABLE_RINGING, &ret);
 		cci_write(dw9719->regmap, DW9719_MODE,
 			  dw9719->sac_mode << DW9800K_MODE_SAC_SHIFT, &ret);
@@ -218,6 +243,7 @@ props:
 		cci_write(dw9719->regmap, DW9719_VCM_FREQ, dw9719->vcm_freq, &ret);
 	}
 
+out:
 	if (ret)
 		dw9719_power_down(dw9719);
 
@@ -229,6 +255,48 @@ static int dw9719_t_focus_abs(struct dw9719_device *dw9719, s32 value)
 	u32 reg = dw9719->model == DW9718S ? DW9718S_VCM_CURRENT
 					   : DW9719_VCM_CURRENT;
 	return cci_write(dw9719->regmap, reg, value, NULL);
+}
+
+/*
+ * In SAC mode the DW9800 drops a position written while it is still moving
+ * to the previous one, the register then keeps the old target. This hits
+ * the last steps of the resume ramp (1 ms apart) and quick control changes.
+ * Write the position again until the chip reports it back.
+ */
+static int dw9719_t_focus_abs_settled(struct dw9719_device *dw9719, s32 value)
+{
+	unsigned int i;
+	u64 hi, lo;
+	int ret;
+
+	switch (dw9719->model) {
+	case DW9800K:
+	case DW9800V:
+		break;
+	default:
+		return dw9719_t_focus_abs(dw9719, value);
+	}
+
+	for (i = 0; i < DW9719_SETTLE_TRIES; i++) {
+		ret = dw9719_t_focus_abs(dw9719, value);
+		if (ret)
+			return ret;
+
+		/* two single reads, like the vendor driver of the DW9800V */
+		ret = cci_read(dw9719->regmap, DW9800K_VCM_CURRENT_HI, &hi, NULL);
+		cci_read(dw9719->regmap, DW9800K_VCM_CURRENT_LO, &lo, &ret);
+		if (ret)
+			return ret;
+
+		if ((((hi << 8) | lo) & DW9719_MAX_FOCUS_POS) == value)
+			return 0;
+
+		usleep_range(DW9719_CTRL_DELAY_US, DW9719_CTRL_DELAY_US + 10);
+	}
+
+	dev_warn(dw9719->dev, "lens did not take position %d\n", value);
+
+	return 0;
 }
 
 static int dw9719_set_ctrl(struct v4l2_ctrl *ctrl)
@@ -244,7 +312,7 @@ static int dw9719_set_ctrl(struct v4l2_ctrl *ctrl)
 
 	switch (ctrl->id) {
 	case V4L2_CID_FOCUS_ABSOLUTE:
-		ret = dw9719_t_focus_abs(dw9719, ctrl->val);
+		ret = dw9719_t_focus_abs_settled(dw9719, ctrl->val);
 		break;
 	default:
 		ret = -EINVAL;
@@ -269,8 +337,14 @@ static int dw9719_suspend(struct device *dev)
 	for (val = dw9719->ctrls.focus->val; val >= 0;
 	     val -= DW9719_CTRL_STEPS) {
 		ret = dw9719_t_focus_abs(dw9719, val);
-		if (ret)
-			return ret;
+		if (ret) {
+			/*
+			 * Power down anyway: failing here would keep VDD on
+			 * and, during system sleep, abort the suspend.
+			 */
+			dev_warn(dev, "Error parking the lens: %d\n", ret);
+			break;
+		}
 
 		usleep_range(DW9719_CTRL_DELAY_US, DW9719_CTRL_DELAY_US + 10);
 	}
@@ -299,29 +373,17 @@ static int dw9719_resume(struct device *dev)
 		usleep_range(DW9719_CTRL_DELAY_US, DW9719_CTRL_DELAY_US + 10);
 	}
 
+	/* The ramp above stops one step short of the target */
+	ret = dw9719_t_focus_abs_settled(dw9719, current_focus);
+	if (ret)
+		goto err_power_down;
+
 	return 0;
 
 err_power_down:
 	dw9719_power_down(dw9719);
 	return ret;
 }
-
-static int dw9719_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
-{
-	return pm_runtime_resume_and_get(sd->dev);
-}
-
-static int dw9719_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
-{
-	pm_runtime_put_autosuspend(sd->dev);
-
-	return 0;
-}
-
-static const struct v4l2_subdev_internal_ops dw9719_internal_ops = {
-	.open = dw9719_open,
-	.close = dw9719_close,
-};
 
 static int dw9719_init_controls(struct dw9719_device *dw9719)
 {
@@ -374,7 +436,6 @@ static int dw9719_probe(struct i2c_client *client)
 
 	v4l2_i2c_subdev_init(&dw9719->sd, client, &dw9719_ops);
 	dw9719->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
-	dw9719->sd.internal_ops = &dw9719_internal_ops;
 
 	ret = dw9719_init_controls(dw9719);
 	if (ret)
@@ -396,6 +457,16 @@ static int dw9719_probe(struct i2c_client *client)
 	ret = dw9719_power_up(dw9719, true);
 	if (ret)
 		goto err_cleanup_media;
+
+	/*
+	 * The chip comes up with a position of its own (DW9800V: 512), move
+	 * the lens to the control value so that both agree.
+	 */
+	ret = dw9719_t_focus_abs_settled(dw9719, dw9719->ctrls.focus->val);
+	if (ret) {
+		dw9719_power_down(dw9719);
+		goto err_cleanup_media;
+	}
 
 	pm_runtime_set_active(&client->dev);
 	pm_runtime_get_noresume(&client->dev);
@@ -444,6 +515,7 @@ static const struct of_device_id dw9719_of_table[] = {
 	{ .compatible = "dongwoon,dw9719", .data = (const void *)DW9719 },
 	{ .compatible = "dongwoon,dw9761", .data = (const void *)DW9761 },
 	{ .compatible = "dongwoon,dw9800k", .data = (const void *)DW9800K },
+	{ .compatible = "dongwoon,dw9800v", .data = (const void *)DW9800V },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, dw9719_of_table);
