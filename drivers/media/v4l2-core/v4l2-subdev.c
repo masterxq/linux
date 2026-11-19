@@ -54,9 +54,14 @@ struct v4l2_subdev_stream_config {
 /*
  * The Streams API is an experimental feature. To use the Streams API, set
  * 'v4l2_subdev_enable_streams_api' to 1 below.
+ *
+ * Enabled for the MT6785 seninf, which routes its sensor inputs to the CAMSV
+ * outputs through its routing table: libcamera only follows the active
+ * routes when it can read them, without them it takes the first CAMSV for
+ * every sensor.
  */
 
-static bool v4l2_subdev_enable_streams_api;
+static bool v4l2_subdev_enable_streams_api = true;
 #endif
 
 /*
