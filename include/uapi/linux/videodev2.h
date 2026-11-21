@@ -829,6 +829,13 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_IPU3_SGRBG10	v4l2_fourcc('i', 'p', '3', 'G') /* IPU3 packed 10-bit GRBG bayer */
 #define V4L2_PIX_FMT_IPU3_SRGGB10	v4l2_fourcc('i', 'p', '3', 'r') /* IPU3 packed 10-bit RGGB bayer */
 
+/* 10bit raw packed, 5 bytes for every 4 pixels, one LSB first bit stream per line */
+#define V4L2_PIX_FMT_MTISP_SBGGR10	v4l2_fourcc('M', 'B', 'B', 'A') /* MTK packed 10-bit BGGR */
+#define V4L2_PIX_FMT_MTISP_SGBRG10	v4l2_fourcc('M', 'B', 'G', 'A') /* MTK packed 10-bit GBRG */
+#define V4L2_PIX_FMT_MTISP_SGRBG10	v4l2_fourcc('M', 'B', 'g', 'A') /* MTK packed 10-bit GRBG */
+#define V4L2_PIX_FMT_MTISP_SRGGB10	v4l2_fourcc('M', 'B', 'R', 'A') /* MTK packed 10-bit RGGB */
+#define V4L2_PIX_FMT_MTISP_Y10		v4l2_fourcc('M', 'B', 'Y', 'A') /* MTK packed 10-bit grey */
+
 /* Raspberry Pi PiSP compressed formats. */
 #define V4L2_PIX_FMT_PISP_COMP1_RGGB	v4l2_fourcc('P', 'C', '1', 'R') /* PiSP 8-bit mode 1 compressed RGGB bayer */
 #define V4L2_PIX_FMT_PISP_COMP1_GRBG	v4l2_fourcc('P', 'C', '1', 'G') /* PiSP 8-bit mode 1 compressed GRBG bayer */
