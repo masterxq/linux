@@ -687,6 +687,17 @@ config SND_SOC_AW88166
 	  digital Smart K audio amplifier with sound quality
 	  enhancement algorithms and speaker protection.
 
+config SND_SOC_AW88258
+	tristate "Soc Audio for awinic aw88258 (chip ID 0x1852), without DSP"
+	depends on I2C
+	select REGMAP_I2C
+	select GPIOLIB
+	help
+	  This option enables support for the awinic AW88258 smart PA
+	  (chip ID 0x1852) as found in the Motorola Moto G60s. Without the
+	  vendor DSP there is no speaker protection: the driver starts
+	  muted, and limiting the level is left to user space.
+
 config SND_SOC_AW88261
 	tristate "Soc Audio for awinic aw88261"
 	depends on I2C
