@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/mediatek,mt6785-mt6359.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 ASoC sound card with MT6359 codec
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+allOf:
+  - $ref: sound-card-common.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6785-mt6359-sound
+
+  audio-routing:
+    description:
+      Valid names are the card widgets (Headphone, Earpiece, Speaker, Main Mic,
+      Sub Mic, Headset Mic) and the input/output widgets of the codecs.
+
+  mediatek,platform:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The phandle of the MT6785 AFE platform.
+
+  mediatek,accdet:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The phandle of the MT6359 ACCDET (headset jack detection).
+
+  pinctrl-names:
+    minItems: 10
+    items:
+      - const: aud_clk_mosi_off
+      - const: aud_clk_mosi_on
+      - const: aud_dat_mosi_off
+      - const: aud_dat_mosi_on
+      - const: aud_dat_miso_off
+      - const: aud_dat_miso_on
+      - const: aud_dat_mosi_ch34_off
+      - const: aud_dat_mosi_ch34_on
+      - const: aud_dat_miso_ch34_off
+      - const: aud_dat_miso_ch34_on
+      - const: aud_gpio_i2s0_off
+      - const: aud_gpio_i2s0_on
+      - const: aud_gpio_i2s3_off
+      - const: aud_gpio_i2s3_on
+
+patternProperties:
+  "^dai-link-[0-9]+$":
+    type: object
+    description:
+      Container for dai-link level properties and the CODEC sub-node.
+
+    properties:
+      link-name:
+        description: Name of the back end dai-link this node updates.
+        enum:
+          - Primary Codec
+          - Primary Codec CH34
+          - I2S3
+          - I2S0
+
+      codec:
+        description: Holds subnode which indicates codec dai.
+        type: object
+        additionalProperties: false
+        properties:
+          sound-dai:
+            maxItems: 1
+        required:
+          - sound-dai
+
+    additionalProperties: false
+
+    required:
+      - link-name
+      - codec
+
+required:
+  - compatible
+  - mediatek,platform
+  - audio-routing
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    sound {
+        compatible = "mediatek,mt6785-mt6359-sound";
+        model = "mt6785_mt6359";
+        mediatek,platform = <&afe>;
+        audio-routing =
+            "Headphone", "Headphone L",
+            "Headphone", "Headphone R",
+            "Earpiece", "Receiver",
+            "AIN0", "Main Mic";
+
+        dai-link-0 {
+            link-name = "Primary Codec";
+            codec {
+                sound-dai = <&pmic 0>;
+            };
+        };
+    };
+
+...

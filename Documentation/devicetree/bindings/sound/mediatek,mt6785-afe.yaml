@@ -1,0 +1,213 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/mediatek,mt6785-afe.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 Audio Front End PCM controller
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description:
+  The Audio Front End (AFE) of the MediaTek MT6785 (Helio G90/G95) moves audio
+  data between memory and the audio interfaces (ADDA link to the MT6359 PMIC
+  codec, I2S, PCM). The register block is shared with the audio clock
+  controller, so the AFE is a child node of the mediatek,mt6785-audsys syscon.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-audio
+
+  interrupts:
+    maxItems: 1
+
+  resets:
+    maxItems: 1
+
+  reset-names:
+    const: audiosys
+
+  memory-region:
+    description: memory region for audio DMA buffers
+    maxItems: 1
+
+  mediatek,topckgen:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The phandle of the topckgen syscon, used for the MTKAIF calibration
+      test registers (CKSYS_AUD_TOP_CFG/MON).
+
+  power-domains:
+    maxItems: 1
+    description:
+      The audio power domain of the SPM power controller. Use this whenever
+      the power controller is enabled.
+
+  mediatek,scpsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The phandle of the SPM (scpsys) syscon. Only for boards that keep the
+      SPM power controller disabled. Without power-domains, the AFE then
+      switches the audio MTCMOS itself (vendor power sequence including the
+      INFRA bus protection). Mutually exclusive with power-domains.
+
+  mediatek,infracfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The phandle of the INFRACFG_AO syscon holding the audio bus protection.
+      Required together with mediatek,scpsys.
+
+  clocks:
+    items:
+      - description: AFE clock
+      - description: Audio ADC sine generator (TML) clock
+      - description: Audio low-jitter 22.5792 MHz clock
+      - description: Audio low-jitter 24.576 MHz clock
+      - description: Audio PLL1 tuner clock
+      - description: Audio PLL2 tuner clock
+      - description: Audio non-LE clock
+      - description: Audio infra sys clock
+      - description: Audio infra 26 MHz clock
+      - description: Mux for audio clock
+      - description: Mux for audio internal bus clock
+      - description: Main PLL divided by 2 and 4, parent of the audio bus
+      - description: Primary audio mux
+      - description: Primary audio PLL
+      - description: Secondary audio mux
+      - description: Secondary audio PLL
+      - description: Primary audio engine clock mux
+      - description: Primary audio PLL divided by 8
+      - description: Secondary audio engine clock mux
+      - description: Secondary audio PLL divided by 8
+      - description: Mux for high resolution audio
+      - description: Mux selector for I2S port 0
+      - description: Mux selector for I2S port 1
+      - description: Mux selector for I2S port 2
+      - description: Mux selector for I2S port 3
+      - description: Mux selector for I2S port 4
+      - description: Mux selector for I2S port 5
+      - description: APLL1 and APLL2 divider for I2S port 0
+      - description: APLL1 and APLL2 divider for I2S port 1
+      - description: APLL1 and APLL2 divider for I2S port 2
+      - description: APLL1 and APLL2 divider for I2S port 3
+      - description: APLL1 and APLL2 divider for I2S port 4
+      - description: APLL1 and APLL2 divider for I2S port 4 bit clock
+      - description: APLL1 and APLL2 divider for I2S port 5
+      - description: Top 26 MHz clock
+      - description: ADDA DAC clock (audsys gate)
+      - description: ADDA DAC pre-distortion clock (audsys gate)
+      - description: ADDA CH34 DAC clock (audsys gate)
+      - description: ADDA CH34 DAC pre-distortion clock (audsys gate)
+      - description: ADDA ADC clock (audsys gate)
+      - description: ADDA6 (CH34) ADC clock (audsys gate)
+
+  clock-names:
+    items:
+      - const: aud_afe_clk
+      - const: aud_tml_clk
+      - const: aud_apll22m_clk
+      - const: aud_apll24m_clk
+      - const: aud_apll1_tuner_clk
+      - const: aud_apll2_tuner_clk
+      - const: aud_nle
+      - const: aud_infra_clk
+      - const: aud_infra_26m_clk
+      - const: top_mux_audio
+      - const: top_mux_audio_int
+      - const: top_mainpll_d2_d4
+      - const: top_mux_aud_1
+      - const: top_apll1_ck
+      - const: top_mux_aud_2
+      - const: top_apll2_ck
+      - const: top_mux_aud_eng1
+      - const: top_apll1_d8
+      - const: top_mux_aud_eng2
+      - const: top_apll2_d8
+      - const: top_mux_audio_h
+      - const: top_i2s0_m_sel
+      - const: top_i2s1_m_sel
+      - const: top_i2s2_m_sel
+      - const: top_i2s3_m_sel
+      - const: top_i2s4_m_sel
+      - const: top_i2s5_m_sel
+      - const: top_apll12_div0
+      - const: top_apll12_div1
+      - const: top_apll12_div2
+      - const: top_apll12_div3
+      - const: top_apll12_div4
+      - const: top_apll12_divb
+      - const: top_apll12_div5
+      - const: top_clk26m_clk
+      - const: aud_dac_clk
+      - const: aud_dac_predis_clk
+      - const: aud_3rd_dac_clk
+      - const: aud_3rd_dac_predis_clk
+      - const: aud_adc_clk
+      - const: aud_adda6_adc_clk
+
+required:
+  - compatible
+  - interrupts
+  - mediatek,topckgen
+  - clocks
+  - clock-names
+
+oneOf:
+  - required:
+      - power-domains
+  - required:
+      - mediatek,scpsys
+      - mediatek,infracfg
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/power/mediatek,mt6785-power.h>
+
+    audio-controller {
+        compatible = "mediatek,mt6785-audio";
+        interrupts = <GIC_SPI 184 IRQ_TYPE_LEVEL_LOW>;
+        mediatek,topckgen = <&topckgen>;
+        power-domains = <&spm MT6785_POWER_DOMAIN_AUDIO>;
+        clocks = <&audsys CLK_AUD_AFE>, <&audsys CLK_AUD_TML>,
+                 <&audsys CLK_AUD_22M>, <&audsys CLK_AUD_24M>,
+                 <&audsys CLK_AUD_APLL_TUNER>, <&audsys CLK_AUD_APLL2_TUNER>,
+                 <&audsys CLK_AUD_NLE>, <&infracfg CLK_INFRA_AUDIO>,
+                 <&infracfg CLK_INFRA_AUDIO_26M>, <&topckgen CLK_TOP_AUDIO>,
+                 <&topckgen CLK_TOP_AUDIO_INTBUS>, <&topckgen CLK_TOP_MAINPLL_D2_D4>,
+                 <&topckgen CLK_TOP_AUDIO1>, <&apmixedsys CLK_APMIXED_APLL1>,
+                 <&topckgen CLK_TOP_AUDIO2>, <&apmixedsys CLK_APMIXED_APLL2>,
+                 <&topckgen CLK_TOP_AUDIO_ENG1>, <&topckgen CLK_TOP_APLL1_D8>,
+                 <&topckgen CLK_TOP_AUDIO_ENG2>, <&topckgen CLK_TOP_APLL2_D8>,
+                 <&topckgen CLK_TOP_AUDIO_HIRES>, <&topckgen CLK_TOP_APLL_I2S0>,
+                 <&topckgen CLK_TOP_APLL_I2S1>, <&topckgen CLK_TOP_APLL_I2S2>,
+                 <&topckgen CLK_TOP_APLL_I2S3>, <&topckgen CLK_TOP_APLL_I2S4>,
+                 <&topckgen CLK_TOP_APLL_I2S5>, <&topckgen CLK_TOP_APLL12_DIV0>,
+                 <&topckgen CLK_TOP_APLL12_DIV1>, <&topckgen CLK_TOP_APLL12_DIV2>,
+                 <&topckgen CLK_TOP_APLL12_DIV3>, <&topckgen CLK_TOP_APLL12_DIV4>,
+                 <&topckgen CLK_TOP_APLL12_DIVB>, <&topckgen CLK_TOP_APLL12_DIV5>,
+                 <&clk26m>, <&audsys CLK_AUD_DAC>, <&audsys CLK_AUD_DAC_PREDIS>,
+                 <&audsys CLK_AUD_3RD_DAC>, <&audsys CLK_AUD_3RD_DAC_PREDIS>,
+                 <&audsys CLK_AUD_ADC>, <&audsys CLK_AUD_ADDA6_ADC>;
+        clock-names = "aud_afe_clk", "aud_tml_clk", "aud_apll22m_clk",
+                      "aud_apll24m_clk", "aud_apll1_tuner_clk",
+                      "aud_apll2_tuner_clk", "aud_nle", "aud_infra_clk",
+                      "aud_infra_26m_clk", "top_mux_audio", "top_mux_audio_int",
+                      "top_mainpll_d2_d4", "top_mux_aud_1", "top_apll1_ck",
+                      "top_mux_aud_2", "top_apll2_ck", "top_mux_aud_eng1",
+                      "top_apll1_d8", "top_mux_aud_eng2", "top_apll2_d8",
+                      "top_mux_audio_h", "top_i2s0_m_sel", "top_i2s1_m_sel",
+                      "top_i2s2_m_sel", "top_i2s3_m_sel", "top_i2s4_m_sel",
+                      "top_i2s5_m_sel", "top_apll12_div0", "top_apll12_div1",
+                      "top_apll12_div2", "top_apll12_div3", "top_apll12_div4",
+                      "top_apll12_divb", "top_apll12_div5", "top_clk26m_clk",
+                      "aud_dac_clk", "aud_dac_predis_clk", "aud_3rd_dac_clk",
+                      "aud_3rd_dac_predis_clk", "aud_adc_clk", "aud_adda6_adc_clk";
+    };
+
+...
