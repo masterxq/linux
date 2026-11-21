@@ -2050,6 +2050,30 @@ static void gsm_control_retransmit(struct timer_list *t)
 }
 
 /**
+ *	gsm_control_abort	-	fail the pending control command
+ *	@gsm: GSM mux
+ *
+ *	Completes a control command that waits for its response with an
+ *	error. Used when the mux goes away and the T2 timer is stopped.
+ */
+
+static void gsm_control_abort(struct gsm_mux *gsm)
+{
+	struct gsm_control *ctrl;
+	unsigned long flags;
+
+	spin_lock_irqsave(&gsm->control_lock, flags);
+	ctrl = gsm->pending_cmd;
+	if (ctrl) {
+		gsm->pending_cmd = NULL;
+		ctrl->error = -EL2HLT;
+		ctrl->done = 1;
+	}
+	spin_unlock_irqrestore(&gsm->control_lock, flags);
+	wake_up(&gsm->event);
+}
+
+/**
  *	gsm_control_send	-	send a control frame on DLCI 0
  *	@gsm: the GSM channel
  *	@command: command  to send including CR bit
@@ -3146,6 +3170,15 @@ static void gsm_cleanup_mux(struct gsm_mux *gsm, bool disc)
 	timer_delete_sync(&gsm->kick_timer);
 	timer_delete_sync(&gsm->t2_timer);
 	timer_delete_sync(&gsm->ka_timer);
+
+	/*
+	 * A control command that is still waiting for its response has just
+	 * lost its retransmission timer and the mux is dead, so nothing would
+	 * ever complete it. Its sender waits uninterruptibly, possibly in the
+	 * close of a DLCI tty with the tty lock held, which the hangup of
+	 * that tty below needs: fail the command now.
+	 */
+	gsm_control_abort(gsm);
 
 	/* Finish writing to ldisc */
 	flush_work(&gsm->tx_work);
