@@ -49,6 +49,11 @@ properties:
     description: |
       Specifies the type of mic type connected to adc2
 
+  vaud18-supply:
+    description:
+      1.8 V audio supply of the codec (MT6359 VAUD18 LDO). The driver switches
+      it as a DAPM supply of the playback and the MTKAIF capture paths.
+
 additionalProperties: false
 
 examples:
