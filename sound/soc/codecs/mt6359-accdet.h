@@ -50,6 +50,8 @@ enum {
 	eint_inverter_state000,
 };
 
+struct iio_channel;
+
 struct three_key_threshold {
 	unsigned int mid;
 	unsigned int up;
@@ -116,6 +118,7 @@ struct mt6359_accdet {
 	unsigned int accdet_status;
 	unsigned int pre_accdet_status;
 	unsigned int cali_voltage;
+	struct iio_channel *btn_adc;
 	unsigned int jd_sts;
 	struct work_struct accdet_work;
 	struct workqueue_struct *accdet_workqueue;

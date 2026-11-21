@@ -493,6 +493,18 @@ static int mt6359_get_playback_volsw(struct snd_kcontrol *kcontrol,
 		return -EINVAL;
 	}
 
+	/*
+	 * ana_gain[] holds register codes: 0 is +8 dB, 0x12 is -10 dB. The
+	 * controls are declared inverted, so report max - code.
+	 */
+	if (mc->invert) {
+		ucontrol->value.integer.value[0] =
+			mc->max - ucontrol->value.integer.value[0];
+		if (snd_soc_volsw_is_stereo(mc))
+			ucontrol->value.integer.value[1] =
+				mc->max - ucontrol->value.integer.value[1];
+	}
+
 	return 0;
 }
 
@@ -2239,6 +2251,8 @@ static const struct snd_soc_dapm_widget mt6359_dapm_widgets[] = {
 			    DL_2_SRC_ON_TMP_CTL_PRE_SFT, 0, NULL, 0),
 
 	SND_SOC_DAPM_INPUT("SGEN DL"),
+	/* sine on the uplink (AFE_TOP_CON0 UL_SINE_ON / ADDA6_UL_SINE_ON) */
+	SND_SOC_DAPM_INPUT("SGEN UL"),
 
 	/* Uplinks */
 	SND_SOC_DAPM_AIF_OUT("AIF1TX", "AIF1 Capture", 0,
@@ -2454,6 +2468,13 @@ static const struct snd_soc_dapm_route mt6359_dapm_routes[] = {
 	{"AIF Out Mux", "Normal Path", "MISO0_MUX"},
 	{"AIF Out Mux", "Normal Path", "MISO1_MUX"},
 	{"AIF2 Out Mux", "Normal Path", "MISO2_MUX"},
+	{"AIF Out Mux", "Sgen", "SGEN UL"},
+	{"AIF2 Out Mux", "Sgen", "SGEN UL"},
+
+	{"SGEN UL", NULL, "SGEN MUTE"},
+	{"SGEN UL", NULL, "SGEN DL Enable"},
+	{"SGEN UL", NULL, "AUDIO_TOP_PDN_AFE_TESTMODEL"},
+	{"SGEN UL", NULL, "UL_SRC"},
 
 	{"MISO0_MUX", "UL1_CH1", "UL_SRC_MUX"},
 	{"MISO0_MUX", "UL1_CH2", "UL_SRC_MUX"},
@@ -2791,6 +2812,18 @@ static int mt6359_codec_init_reg(struct snd_soc_component *cmpnt)
 	/* hp hifi mode, default normal mode */
 	priv->hp_hifi_mode = 0;
 
+	/*
+	 * Start all analog playback gains at the lowest control step (-10 dB).
+	 * The zero initialised ana_gain[] would otherwise ramp the outputs to
+	 * register code 0, which is the highest gain (+8 dB).
+	 */
+	priv->ana_gain[AUDIO_ANALOG_VOLUME_HPOUTL] = DL_GAIN_N_10DB;
+	priv->ana_gain[AUDIO_ANALOG_VOLUME_HPOUTR] = DL_GAIN_N_10DB;
+	priv->ana_gain[AUDIO_ANALOG_VOLUME_LINEOUTL] = DL_GAIN_N_10DB;
+	priv->ana_gain[AUDIO_ANALOG_VOLUME_LINEOUTR] = DL_GAIN_N_10DB;
+	priv->ana_gain[AUDIO_ANALOG_VOLUME_HSOUTL] = DL_GAIN_N_10DB;
+	priv->ana_gain[AUDIO_ANALOG_VOLUME_HSOUTR] = DL_GAIN_N_10DB;
+
 	/* Disable AUD_ZCD */
 	zcd_disable(priv);
 
@@ -2821,16 +2854,20 @@ static const DECLARE_TLV_DB_SCALE(capture_tlv, 0, 600, 0);
 
 static const struct snd_kcontrol_new mt6359_snd_controls[] = {
 	/* dl pga gain */
+	/*
+	 * Register code 0 is +8 dB and 0x12 is -10 dB, so the controls are
+	 * inverted to match playback_tlv (-10 dB .. +8 dB in 1 dB steps).
+	 */
 	SOC_DOUBLE_EXT_TLV("Headset Volume",
-			   MT6359_ZCD_CON2, 0, 7, 0x12, 0,
+			   MT6359_ZCD_CON2, 0, 7, 0x12, 1,
 			   mt6359_get_playback_volsw, mt6359_put_volsw,
 			   playback_tlv),
 	SOC_DOUBLE_EXT_TLV("Lineout Volume",
-			   MT6359_ZCD_CON1, 0, 7, 0x12, 0,
+			   MT6359_ZCD_CON1, 0, 7, 0x12, 1,
 			   mt6359_get_playback_volsw, mt6359_put_volsw,
 			   playback_tlv),
 	SOC_SINGLE_EXT_TLV("Handset Volume",
-			   MT6359_ZCD_CON3, 0, 0x12, 0,
+			   MT6359_ZCD_CON3, 0, 0x12, 1,
 			   mt6359_get_playback_volsw, mt6359_put_volsw,
 			   playback_tlv),
 
@@ -2958,3 +2995,4 @@ MODULE_DESCRIPTION("MT6359 ALSA SoC codec driver");
 MODULE_AUTHOR("KaiChieh Chuang <kaichieh.chuang@mediatek.com>");
 MODULE_AUTHOR("Eason Yen <eason.yen@mediatek.com>");
 MODULE_LICENSE("GPL v2");
+MODULE_ALIAS("platform:mt6359-sound");
