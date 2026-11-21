@@ -2792,6 +2792,7 @@ config SND_SOC_MT6359
 config SND_SOC_MT6359_ACCDET
 	tristate "MediaTek MT6359 ACCDET driver"
 	depends on MTK_PMIC_WRAP
+	depends on IIO
 	help
 	  ACCDET means Accessory Detection technology, MediaTek develop it
 	  for ASoC codec soc-jack detection mechanism.

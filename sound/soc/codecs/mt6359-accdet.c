@@ -7,6 +7,7 @@
 //
 
 #include <linux/of.h>
+#include <linux/iio/consumer.h>
 #include <linux/input.h>
 #include <linux/kthread.h>
 #include <linux/io.h>
@@ -354,12 +355,35 @@ static unsigned int check_button(struct mt6359_accdet *priv, unsigned int v)
 	return 0;
 }
 
+/*
+ * Microphone line voltage while a button is held, in mV. The thresholds
+ * (mediatek,three-key-thr / four-key-thr) are in mV as well. Without the
+ * AUXADC channel every button reads as 0 mV, i.e. as BTN_0.
+ */
+static void mt6359_accdet_read_btn_voltage(struct mt6359_accdet *priv)
+{
+	int mv = 0, ret;
+
+	if (priv->btn_adc) {
+		ret = iio_read_channel_processed(priv->btn_adc, &mv);
+		if (ret < 0) {
+			dev_warn_ratelimited(priv->dev,
+					     "button voltage: %d\n", ret);
+			mv = 0;
+		}
+	}
+	priv->cali_voltage = max(mv, 0);
+	dev_dbg(priv->dev, "button voltage %d mV\n", mv);
+}
+
 static void is_key_pressed(struct mt6359_accdet *priv, bool pressed)
 {
 	priv->btn_type = priv->jack_type & ~MT6359_ACCDET_BTN_MASK;
 
-	if (pressed)
+	if (pressed) {
+		mt6359_accdet_read_btn_voltage(priv);
 		check_button(priv, priv->cali_voltage);
+	}
 }
 
 static inline void check_jack_btn_type(struct mt6359_accdet *priv)
@@ -472,11 +496,13 @@ static irqreturn_t mt6359_accdet_irq(int irq, void *data)
 					       (value & ACCDET_IRQ_MASK_SFT) == 0,
 					       0,
 					       1000);
-		if (ret) {
-			dev_err(priv->dev, "%s(), ret %d\n", __func__, ret);
-			mutex_unlock(&priv->res_lock);
-			return IRQ_NONE;
-		}
+		/*
+		 * Like the vendor driver, go on after a timeout: returning
+		 * here would leave the clear bit set and block every later
+		 * ACCDET interrupt.
+		 */
+		if (ret)
+			dev_warn(priv->dev, "%s(), irq clear %d\n", __func__, ret);
 		regmap_update_bits(priv->regmap, ACCDET_IRQ_ADDR,
 				   ACCDET_IRQ_CLR_MASK_SFT, 0);
 		regmap_update_bits(priv->regmap, RG_INT_STATUS_ACCDET_ADDR,
@@ -495,12 +521,9 @@ static irqreturn_t mt6359_accdet_irq(int irq, void *data)
 						       (value & ACCDET_EINT0_IRQ_MASK_SFT) == 0,
 						       0,
 						       1000);
-			if (ret) {
-				dev_err(priv->dev, "%s(), ret %d\n", __func__,
-					ret);
-				mutex_unlock(&priv->res_lock);
-				return IRQ_NONE;
-			}
+			if (ret)
+				dev_warn(priv->dev, "%s(), eint clear %d\n",
+					 __func__, ret);
 			regmap_update_bits(priv->regmap, ACCDET_IRQ_ADDR,
 					   ACCDET_EINT0_IRQ_CLR_MASK_SFT, 0);
 			regmap_update_bits(priv->regmap,
@@ -518,12 +541,9 @@ static irqreturn_t mt6359_accdet_irq(int irq, void *data)
 						       (value & ACCDET_EINT1_IRQ_MASK_SFT) == 0,
 						       0,
 						       1000);
-			if (ret) {
-				dev_err(priv->dev, "%s(), ret %d\n", __func__,
-					ret);
-				mutex_unlock(&priv->res_lock);
-				return IRQ_NONE;
-			}
+			if (ret)
+				dev_warn(priv->dev, "%s(), eint clear %d\n",
+					 __func__, ret);
 			regmap_update_bits(priv->regmap, ACCDET_IRQ_ADDR,
 					   ACCDET_EINT1_IRQ_CLR_MASK_SFT, 0);
 			regmap_update_bits(priv->regmap,
@@ -906,14 +926,18 @@ int mt6359_accdet_enable_jack_detect(struct snd_soc_component *component,
 	struct mt6359_accdet *priv =
 		snd_soc_component_get_drvdata(component);
 
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_1, KEY_VOLUMEDOWN);
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_2, KEY_VOLUMEUP);
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_3, KEY_VOICECOMMAND);
+	if (jack) {
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_1, KEY_VOLUMEDOWN);
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_2, KEY_VOLUMEUP);
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_3, KEY_VOICECOMMAND);
+	}
 
+	/* NULL detaches the jack before the card that owns it goes away */
+	mutex_lock(&priv->res_lock);
 	priv->jack = jack;
-
 	mt6359_accdet_jack_report(priv);
+	mutex_unlock(&priv->res_lock);
 
 	return 0;
 }
@@ -958,7 +982,46 @@ static int mt6359_accdet_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Failed to parse dts\n");
 		return ret;
 	}
+	/* optional: AUXADC channel for the button voltage */
+	priv->btn_adc = devm_iio_channel_get(&pdev->dev, "accdet");
+	if (IS_ERR(priv->btn_adc)) {
+		ret = PTR_ERR(priv->btn_adc);
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		dev_info(&pdev->dev,
+			 "no accdet AUXADC channel (%d), buttons read as BTN_0\n",
+			 ret);
+		priv->btn_adc = NULL;
+	}
+
 	mutex_init(&priv->res_lock);
+	INIT_WORK(&priv->accdet_work, mt6359_accdet_work);
+	INIT_WORK(&priv->jd_work, mt6359_accdet_jd_work);
+
+	/*
+	 * The workqueues must exist before the interrupts are requested: an
+	 * event that is already pending (headset plugged at boot, PMIC state
+	 * kept over a warm reboot) runs the handler right away. devm releases
+	 * in reverse order, so the interrupts are freed before the workqueues
+	 * are flushed and destroyed.
+	 */
+	priv->accdet_workqueue = devm_alloc_ordered_workqueue(&pdev->dev,
+							       "accdet", 0);
+	if (!priv->accdet_workqueue)
+		return -ENOMEM;
+
+	priv->jd_workqueue = devm_alloc_ordered_workqueue(&pdev->dev,
+							  "mt6359_accdet_jd", 0);
+	if (!priv->jd_workqueue)
+		return -ENOMEM;
+
+	platform_set_drvdata(pdev, priv);
+
+	priv->jd_sts = M_PLUG_OUT;
+	priv->jack_type = 0;
+	priv->btn_type = 0;
+	priv->accdet_status = 0x3;
+	mt6359_accdet_init(priv);
 
 	priv->accdet_irq = platform_get_irq(pdev, 0);
 	if (priv->accdet_irq >= 0) {
@@ -1005,23 +1068,6 @@ static int mt6359_accdet_probe(struct platform_device *pdev)
 		}
 	}
 
-	priv->accdet_workqueue = create_singlethread_workqueue("accdet");
-	INIT_WORK(&priv->accdet_work, mt6359_accdet_work);
-	if (!priv->accdet_workqueue) {
-		dev_err(&pdev->dev, "Failed to create accdet workqueue\n");
-		ret = -1;
-		goto err_accdet_wq;
-	}
-
-	priv->jd_workqueue = create_singlethread_workqueue("mt6359_accdet_jd");
-	INIT_WORK(&priv->jd_work, mt6359_accdet_jd_work);
-	if (!priv->jd_workqueue) {
-		dev_err(&pdev->dev, "Failed to create jack detect workqueue\n");
-		ret = -1;
-		goto err_eint_wq;
-	}
-
-	platform_set_drvdata(pdev, priv);
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &mt6359_accdet_soc_driver,
 					      NULL, 0);
@@ -1030,26 +1076,19 @@ static int mt6359_accdet_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	priv->jd_sts = M_PLUG_OUT;
-	priv->jack_type = 0;
-	priv->btn_type = 0;
-	priv->accdet_status = 0x3;
-	mt6359_accdet_init(priv);
-
-	mt6359_accdet_jack_report(priv);
-
 	return 0;
-
-err_eint_wq:
-	destroy_workqueue(priv->accdet_workqueue);
-err_accdet_wq:
-	dev_err(&pdev->dev, "%s error. now exit.!\n", __func__);
-	return ret;
 }
+
+static const struct of_device_id mt6359_accdet_of_match[] = {
+	{ .compatible = "mediatek,mt6359-accdet" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, mt6359_accdet_of_match);
 
 static struct platform_driver mt6359_accdet_driver = {
 	.driver = {
 		.name = "pmic-codec-accdet",
+		.of_match_table = mt6359_accdet_of_match,
 	},
 	.probe = mt6359_accdet_probe,
 };
