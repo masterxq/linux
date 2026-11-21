@@ -53,6 +53,7 @@ snd-soc-aw88395-lib-y := aw88395/aw88395_lib.o \
 			aw88395/aw88395_device.o
 snd-soc-aw88395-y := aw88395/aw88395.o
 snd-soc-aw88166-y := aw88166.o
+snd-soc-aw88258-y := aw88258.o
 snd-soc-aw88261-y := aw88261.o
 snd-soc-aw88399-y := aw88399.o
 snd-soc-aw88399-lib-y := aw88399-lib.o
@@ -497,6 +498,7 @@ obj-$(CONFIG_SND_SOC_AW88081)	+= snd-soc-aw88081.o
 obj-$(CONFIG_SND_SOC_AW88395_LIB) += snd-soc-aw88395-lib.o
 obj-$(CONFIG_SND_SOC_AW88395)	+=snd-soc-aw88395.o
 obj-$(CONFIG_SND_SOC_AW88166)	+=snd-soc-aw88166.o
+obj-$(CONFIG_SND_SOC_AW88258)	+=snd-soc-aw88258.o
 obj-$(CONFIG_SND_SOC_AW88261)	+=snd-soc-aw88261.o
 obj-$(CONFIG_SND_SOC_AW88399)	+= snd-soc-aw88399.o
 obj-$(CONFIG_SND_SOC_AW88399_LIB) += snd-soc-aw88399-lib.o
