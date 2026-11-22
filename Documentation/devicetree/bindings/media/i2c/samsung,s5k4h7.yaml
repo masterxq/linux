@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/samsung,s5k4h7.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung S5K4H7 and S5K5E9 image sensors
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description: |
+  The Samsung S5K4H7 (8 megapixel, up to four MIPI CSI-2 data lanes) and S5K5E9
+  (5 megapixel, up to two data lanes) are Bayer CMOS image sensors with
+  one-time programmable memory. They are controlled over I2C with 16-bit
+  register addresses; the chip ID is in registers 0x0000 and 0x0001. The sensor
+  is powered by an analog (AVDD), a core (DVDD) and an I/O (DOVDD) supply and
+  clocked by an external clock. The active low XSHUTDOWN line keeps it in
+  reset.
+
+allOf:
+  - $ref: /schemas/media/video-interface-devices.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,s5k5e9
+    then:
+      properties:
+        port:
+          properties:
+            endpoint:
+              properties:
+                data-lanes:
+                  maxItems: 2
+
+properties:
+  compatible:
+    enum:
+      - samsung,s5k4h7
+      - samsung,s5k5e9
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    description: External clock of the sensor.
+    maxItems: 1
+
+  avdd-supply:
+    description: Analog supply, 2.8 V.
+
+  dvdd-supply:
+    description: Digital core supply.
+
+  dovdd-supply:
+    description: Digital I/O supply, 1.8 V.
+
+  reset-gpios:
+    description: XSHUTDOWN line, active low.
+    maxItems: 1
+
+  mux-states:
+    description:
+      Position of a board MIPI CSI-2 switch that connects the sensor to the
+      receiver, selected while the sensor streams.
+    maxItems: 1
+
+  port:
+    $ref: /schemas/graph.yaml#/$defs/port-base
+    additionalProperties: false
+    description: Output port, a single endpoint for the CSI-2 transmitter.
+
+    properties:
+      endpoint:
+        $ref: /schemas/media/video-interfaces.yaml#
+        unevaluatedProperties: false
+
+        properties:
+          data-lanes:
+            minItems: 1
+            maxItems: 4
+
+          link-frequencies: true
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - avdd-supply
+  - dvdd-supply
+  - dovdd-supply
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        camera@2d {
+            compatible = "samsung,s5k4h7";
+            reg = <0x2d>;
+            clocks = <&camera_mclk>;
+            avdd-supply = <&cam_avdd>;
+            dvdd-supply = <&cam_dvdd>;
+            dovdd-supply = <&cam_dovdd>;
+            reset-gpios = <&pio 118 GPIO_ACTIVE_LOW>;
+            mux-states = <&cam_mipi_switch 1>;
+            orientation = <1>;
+
+            port {
+                endpoint {
+                    data-lanes = <1 2 3 4>;
+                    link-frequencies = /bits/ 64 <350000000>;
+                    remote-endpoint = <&csi0_in>;
+                };
+            };
+        };
+
+        camera@10 {
+            compatible = "samsung,s5k5e9";
+            reg = <0x10>;
+            clocks = <&camera_mclk2>;
+            avdd-supply = <&cam_avdd>;
+            dvdd-supply = <&cam_dvdd>;
+            dovdd-supply = <&cam_dovdd>;
+            reset-gpios = <&pio 125 GPIO_ACTIVE_LOW>;
+            mux-states = <&cam_mipi_switch 0>;
+            orientation = <1>;
+
+            port {
+                endpoint {
+                    data-lanes = <1 2>;
+                    link-frequencies = /bits/ 64 <438000000>;
+                    remote-endpoint = <&csi0a_in>;
+                };
+            };
+        };
+    };
+...
