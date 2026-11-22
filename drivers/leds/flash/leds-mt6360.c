@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/bitfield.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -9,9 +10,11 @@
 #include <linux/led-class-multicolor.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/thermal.h>
 #include <media/v4l2-flash-led-class.h>
 
 enum {
@@ -28,6 +31,8 @@ enum {
 #define MT6360_REG_ISNK(_led_no)	(0x381 + (_led_no))
 #define MT6360_ISNK_ENMASK(_led_no)	BIT(7 - (_led_no))
 #define MT6360_ISNK_MASK		GENMASK(4, 0)
+#define MT6360_ISNK_MODE_MASK		GENMASK(7, 6)
+#define MT6360_ISNK_MODE_CC		2
 #define MT6360_CHRINDSEL_MASK		BIT(3)
 
 /* Virtual definition for multicolor */
@@ -81,6 +86,10 @@ struct mt6360_led {
 	struct mt6360_priv *priv;
 	u32 led_no;
 	enum led_default_state default_state;
+	/* Flash LEDs only: thermal cooling state and requested torch level */
+	bool cooling;
+	unsigned long cool_state;
+	u32 torch_level;
 };
 
 struct mt6360_priv {
@@ -93,6 +102,17 @@ struct mt6360_priv {
 	unsigned int leds_count;
 	struct mt6360_led leds[] __counted_by(leds_count);
 };
+
+/*
+ * ISNK1-3 can come up in PWM mode (mode field 0), in which the output follows
+ * the PWM duty and frequency registers. Brightness is a constant current in
+ * this driver, so select CC mode with every level write. ISNKML only supports
+ * CC mode and is left as it is.
+ */
+static u32 mt6360_isnk_cc_val(u32 level)
+{
+	return FIELD_PREP(MT6360_ISNK_MODE_MASK, MT6360_ISNK_MODE_CC) | level;
+}
 
 static int mt6360_mc_brightness_set(struct led_classdev *lcdev,
 				    enum led_brightness level)
@@ -112,7 +132,9 @@ static int mt6360_mc_brightness_set(struct led_classdev *lcdev,
 
 		real_bright = min(lcdev->max_brightness, subled->brightness);
 		ret = regmap_update_bits(priv->regmap, MT6360_REG_ISNK(i),
-					 MT6360_ISNK_MASK, real_bright);
+					 MT6360_ISNK_MODE_MASK |
+					 MT6360_ISNK_MASK,
+					 mt6360_isnk_cc_val(real_bright));
 		if (ret)
 			goto out;
 
@@ -136,12 +158,18 @@ static int mt6360_isnk_brightness_set(struct led_classdev *lcdev,
 	struct mt6360_priv *priv = led->priv;
 	u32 enable_mask = MT6360_ISNK_ENMASK(led->led_no);
 	u32 val = level ? MT6360_ISNK_ENMASK(led->led_no) : 0;
+	u32 mask = MT6360_ISNK_MASK, regval = level;
 	int ret;
+
+	if (led->led_no != MT6360_LED_ISNKML) {
+		mask |= MT6360_ISNK_MODE_MASK;
+		regval = mt6360_isnk_cc_val(level);
+	}
 
 	mutex_lock(&priv->lock);
 
 	ret = regmap_update_bits(priv->regmap, MT6360_REG_ISNK(led->led_no),
-				 MT6360_ISNK_MASK, level);
+				 mask, regval);
 	if (ret)
 		goto out;
 
@@ -153,15 +181,80 @@ out:
 	return ret;
 }
 
+/*
+ * Cooling state n of a flash LED with max_brightness N lowers the torch limit
+ * by n levels; state N switches the LED off. The strobe current is reduced in
+ * proportion, from flash-max-microamp at state 0 down to the minimum strobe
+ * current at state N - 1. Both are called with priv->lock held.
+ */
+static u32 mt6360_torch_limit(const struct mt6360_led *led)
+{
+	u32 levels = led->flash.led_cdev.max_brightness;
+
+	return levels - min_t(unsigned long, led->cool_state, levels);
+}
+
+static u32 mt6360_strobe_limit(const struct mt6360_led *led)
+{
+	const struct led_flash_setting *s = &led->flash.brightness;
+	u32 levels = led->flash.led_cdev.max_brightness;
+	u32 limit;
+
+	if (!led->cool_state)
+		return s->max;
+
+	if (led->cool_state >= levels)
+		return 0;
+
+	limit = s->max - mult_frac(s->max - s->min, (u32)led->cool_state,
+				   levels - 1);
+
+	return s->min + rounddown(limit - s->min, s->step);
+}
+
+/* Called with priv->lock held */
+static int mt6360_torch_hw_set(struct mt6360_led *led, u32 level)
+{
+	struct mt6360_priv *priv = led->priv;
+	u32 enable_mask = MT6360_TORCHEN_MASK | MT6360_FLCSEN_MASK(led->led_no);
+	u32 val = level ? MT6360_FLCSEN_MASK(led->led_no) : 0;
+	u32 prev = priv->fled_torch_used, curr;
+	int ret;
+
+	if (level)
+		curr = prev | BIT(led->led_no);
+	else
+		curr = prev & ~BIT(led->led_no);
+
+	if (curr)
+		val |= MT6360_TORCHEN_MASK;
+
+	if (level) {
+		ret = regmap_update_bits(priv->regmap,
+					 MT6360_REG_FLEDITOR(led->led_no),
+					 MT6360_ITORCH_MASK, level - 1);
+		if (ret)
+			return ret;
+	}
+
+	ret = regmap_update_bits(priv->regmap, MT6360_REG_FLEDEN, enable_mask,
+				 val);
+	if (ret)
+		return ret;
+
+	priv->fled_torch_used = curr;
+
+	return 0;
+}
+
 static int mt6360_torch_brightness_set(struct led_classdev *lcdev,
 				       enum led_brightness level)
 {
 	struct mt6360_led *led =
 		container_of(lcdev, struct mt6360_led, flash.led_cdev);
 	struct mt6360_priv *priv = led->priv;
-	u32 enable_mask = MT6360_TORCHEN_MASK | MT6360_FLCSEN_MASK(led->led_no);
-	u32 val = level ? MT6360_FLCSEN_MASK(led->led_no) : 0;
-	u32 prev = priv->fled_torch_used, curr;
+	u32 hw_level = level;
+	bool limited = false;
 	int ret;
 
 	mutex_lock(&priv->lock);
@@ -177,31 +270,23 @@ static int mt6360_torch_brightness_set(struct led_classdev *lcdev,
 		goto unlock;
 	}
 
-	if (level)
-		curr = prev | BIT(led->led_no);
-	else
-		curr = prev & ~BIT(led->led_no);
-
-	if (curr)
-		val |= MT6360_TORCHEN_MASK;
-
-	if (level) {
-		ret = regmap_update_bits(priv->regmap,
-					 MT6360_REG_FLEDITOR(led->led_no),
-					 MT6360_ITORCH_MASK, level - 1);
-		if (ret)
-			goto unlock;
-	}
-
-	ret = regmap_update_bits(priv->regmap, MT6360_REG_FLEDEN, enable_mask,
-				 val);
-	if (ret)
-		goto unlock;
-
-	priv->fled_torch_used = curr;
+	/*
+	 * Keep the requested level, so that it is restored once the thermal
+	 * limit is lifted, and program at most the current limit.
+	 */
+	hw_level = min(hw_level, mt6360_torch_limit(led));
+	ret = mt6360_torch_hw_set(led, hw_level);
+	if (!ret)
+		led->torch_level = level;
+	limited = led->cool_state;
 
 unlock:
 	mutex_unlock(&priv->lock);
+
+	/* While a limit is active, report every level driven */
+	if (!ret && limited)
+		led_classdev_notify_brightness_hw_changed(lcdev, hw_level);
+
 	return ret;
 }
 
@@ -231,19 +316,17 @@ static int _mt6360_flash_brightness_set(struct led_classdev_flash *fl_cdev,
 				  MT6360_ISTROBE_MASK, val);
 }
 
-static int mt6360_strobe_set(struct led_classdev_flash *fl_cdev, bool state)
+/* Called with priv->lock held */
+static int __mt6360_strobe_set(struct mt6360_led *led, bool state)
 {
-	struct mt6360_led *led =
-		container_of(fl_cdev, struct mt6360_led, flash);
+	struct led_classdev_flash *fl_cdev = &led->flash;
 	struct mt6360_priv *priv = led->priv;
 	struct led_classdev *lcdev = &fl_cdev->led_cdev;
 	struct led_flash_setting *s = &fl_cdev->brightness;
 	u32 enable_mask = MT6360_STROBEN_MASK | MT6360_FLCSEN_MASK(led->led_no);
 	u32 val = state ? MT6360_FLCSEN_MASK(led->led_no) : 0;
-	u32 prev = priv->fled_strobe_used, curr;
-	int ret = 0;
-
-	mutex_lock(&priv->lock);
+	u32 prev = priv->fled_strobe_used, curr, limit = 0;
+	int ret;
 
 	/*
 	 * If the state of the upcoming change is the same as the current LED
@@ -252,7 +335,7 @@ static int mt6360_strobe_set(struct led_classdev_flash *fl_cdev, bool state)
 	 */
 	if (state == !!(BIT(led->led_no) & prev)) {
 		dev_info(lcdev->dev, "No change in strobe state [0x%x]\n", prev);
-		goto unlock;
+		return 0;
 	}
 
 	/*
@@ -262,8 +345,14 @@ static int mt6360_strobe_set(struct led_classdev_flash *fl_cdev, bool state)
 	if (priv->fled_torch_used) {
 		dev_warn(lcdev->dev, "Please disable torch first [0x%x]\n",
 			 priv->fled_torch_used);
-		ret = -EBUSY;
-		goto unlock;
+		return -EBUSY;
+	}
+
+	/* No strobe while the thermal limit keeps the LED off */
+	if (state) {
+		limit = mt6360_strobe_limit(led);
+		if (!limit)
+			return -EBUSY;
 	}
 
 	if (state)
@@ -279,17 +368,18 @@ static int mt6360_strobe_set(struct led_classdev_flash *fl_cdev, bool state)
 	if (ret) {
 		dev_err(lcdev->dev, "[%d] control current source %d fail\n",
 			led->led_no, state);
-		goto unlock;
+		return ret;
 	}
 
 	/*
 	 * If the flash need to be on, config the flash current ramping up to
-	 * the setting value.
+	 * the setting value, at most the thermal limit.
 	 * Else, always recover back to the minimum one
 	 */
-	ret = _mt6360_flash_brightness_set(fl_cdev, state ? s->val : s->min);
+	ret = _mt6360_flash_brightness_set(fl_cdev,
+					   state ? min(s->val, limit) : s->min);
 	if (ret)
-		goto unlock;
+		return ret;
 
 	/*
 	 * For the flash turn on/off, HW rampping up/down time is 5ms/500us,
@@ -302,8 +392,20 @@ static int mt6360_strobe_set(struct led_classdev_flash *fl_cdev, bool state)
 
 	priv->fled_strobe_used = curr;
 
-unlock:
+	return 0;
+}
+
+static int mt6360_strobe_set(struct led_classdev_flash *fl_cdev, bool state)
+{
+	struct mt6360_led *led =
+		container_of(fl_cdev, struct mt6360_led, flash);
+	struct mt6360_priv *priv = led->priv;
+	int ret;
+
+	mutex_lock(&priv->lock);
+	ret = __mt6360_strobe_set(led, state);
 	mutex_unlock(&priv->lock);
+
 	return ret;
 }
 
@@ -376,6 +478,9 @@ static int mt6360_fault_get(struct led_classdev_flash *fl_cdev, u32 *fault)
 
 	if (fled_stat & MT6360_FLEDLVF_MASK)
 		rfault |= LED_FAULT_UNDER_VOLTAGE;
+
+	if (led->cool_state >= fl_cdev->led_cdev.max_brightness)
+		rfault |= LED_FAULT_LED_OVER_TEMPERATURE;
 
 	*fault = rfault;
 unlock:
@@ -477,6 +582,11 @@ static int mt6360_flash_external_strobe_set(struct v4l2_flash *v4l2_flash,
 
 	mutex_lock(&priv->lock);
 
+	if (enable && !mt6360_strobe_limit(led)) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
 	ret = regmap_update_bits(priv->regmap, MT6360_REG_FLEDEN, mask, val);
 	if (ret)
 		goto unlock;
@@ -514,6 +624,8 @@ static void mt6360_init_v4l2_flash_config(struct mt6360_led *led,
 	config->flash_faults = LED_FAULT_SHORT_CIRCUIT | LED_FAULT_TIMEOUT |
 			       LED_FAULT_INPUT_VOLTAGE |
 			       LED_FAULT_UNDER_VOLTAGE;
+	if (led->cooling)
+		config->flash_faults |= LED_FAULT_LED_OVER_TEMPERATURE;
 }
 #else
 static const struct v4l2_flash_ops v4l2_flash_ops;
@@ -522,6 +634,96 @@ static void mt6360_init_v4l2_flash_config(struct mt6360_led *led,
 {
 }
 #endif
+
+static int mt6360_cooling_get_max_state(struct thermal_cooling_device *cdev,
+					unsigned long *state)
+{
+	struct mt6360_led *led = cdev->devdata;
+
+	*state = led->flash.led_cdev.max_brightness;
+
+	return 0;
+}
+
+static int mt6360_cooling_get_cur_state(struct thermal_cooling_device *cdev,
+					unsigned long *state)
+{
+	struct mt6360_led *led = cdev->devdata;
+	struct mt6360_priv *priv = led->priv;
+
+	mutex_lock(&priv->lock);
+	*state = led->cool_state;
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static int mt6360_cooling_set_cur_state(struct thermal_cooling_device *cdev,
+					unsigned long state)
+{
+	struct mt6360_led *led = cdev->devdata;
+	struct mt6360_priv *priv = led->priv;
+	struct led_classdev *lcdev = &led->flash.led_cdev;
+	u32 old_level, new_level;
+	bool changed = false;
+	int ret = 0;
+
+	if (state > lcdev->max_brightness)
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+
+	old_level = min(led->torch_level, mt6360_torch_limit(led));
+	led->cool_state = state;
+	new_level = min(led->torch_level, mt6360_torch_limit(led));
+
+	if (priv->fled_strobe_used & BIT(led->led_no)) {
+		/*
+		 * A strobe is short and ends by its timeout, so a lower
+		 * current applies from the next strobe on. Only cut it off
+		 * when the LED has to be switched off.
+		 */
+		if (!mt6360_strobe_limit(led))
+			ret = __mt6360_strobe_set(led, false);
+	} else if (new_level != old_level) {
+		ret = mt6360_torch_hw_set(led, new_level);
+		changed = !ret;
+	}
+
+	mutex_unlock(&priv->lock);
+
+	/*
+	 * The brightness attribute keeps the requested level; report the
+	 * level actually driven through brightness_hw_changed.
+	 */
+	if (changed)
+		led_classdev_notify_brightness_hw_changed(lcdev, new_level);
+
+	return ret;
+}
+
+static const struct thermal_cooling_device_ops mt6360_cooling_ops = {
+	.get_max_state = mt6360_cooling_get_max_state,
+	.get_cur_state = mt6360_cooling_get_cur_state,
+	.set_cur_state = mt6360_cooling_set_cur_state,
+};
+
+static int mt6360_flash_cooling_register(struct device *parent,
+					 struct mt6360_led *led,
+					 struct fwnode_handle *fwnode)
+{
+	struct thermal_cooling_device *cdev;
+
+	cdev = devm_thermal_of_cooling_device_register(parent, to_of_node(fwnode),
+						       dev_name(led->flash.led_cdev.dev),
+						       led, &mt6360_cooling_ops);
+	if (IS_ERR(cdev))
+		return dev_err_probe(parent, PTR_ERR(cdev),
+				     "Failed to register %d cooling device\n",
+				     led->led_no);
+
+	return 0;
+}
 
 static int mt6360_led_register(struct device *parent, struct mt6360_led *led,
 				struct led_init_data *init_data)
@@ -603,6 +805,13 @@ static int mt6360_led_register(struct device *parent, struct mt6360_led *led,
 			dev_err(parent, "Failed to register %d v4l2 sd\n",
 				led->led_no);
 			return PTR_ERR(led->v4l2_flash);
+		}
+
+		if (led->cooling) {
+			ret = mt6360_flash_cooling_register(parent, led,
+							    init_data->fwnode);
+			if (ret)
+				return ret;
 		}
 	}
 
@@ -725,6 +934,16 @@ static int mt6360_init_flash_properties(struct mt6360_led *led,
 		(val - MT6360_ITORCH_MINUA) / MT6360_ITORCH_STEPUA + 1;
 	lcdev->brightness_set_blocking = mt6360_torch_brightness_set;
 	lcdev->flags |= LED_DEV_CAP_FLASH;
+
+	/*
+	 * As a thermal cooling device the LED may be driven below the
+	 * requested level; brightness_hw_changed reports the level in use.
+	 */
+	if (IS_ENABLED(CONFIG_THERMAL) &&
+	    fwnode_property_present(init_data->fwnode, "#cooling-cells")) {
+		led->cooling = true;
+		lcdev->flags |= LED_BRIGHT_HW_CHANGED;
+	}
 
 	ret = fwnode_property_read_u32(init_data->fwnode, "flash-max-microamp",
 				       &val);
