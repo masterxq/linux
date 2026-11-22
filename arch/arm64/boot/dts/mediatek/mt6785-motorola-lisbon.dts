@@ -4,3 +4,7 @@
 #include "mt6785-motorola-lisbon-m1.dts"
 #include "mt6785-motorola-lisbon-mt6382.dtsi"
 #include "mt6785-motorola-lisbon-backlight.dtsi"
+#include "mt6785-motorola-lisbon-keys.dtsi"
+#include "mt6785-motorola-lisbon-flash.dtsi"
+#include "mt6785-motorola-lisbon-haptic.dtsi"
+#include "mt6785-motorola-lisbon-keypad.dtsi"

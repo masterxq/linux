@@ -7,6 +7,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-xiaomi-begonia-tianma.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-m1.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-simplefb.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-keys.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-nodisplay.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-pmic.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-ufs.dtb

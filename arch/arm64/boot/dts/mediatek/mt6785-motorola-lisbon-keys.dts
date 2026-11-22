@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with the power key (MT6359 PWRKEY) through mtk-pmic-keys.
+ *
+ * For MT6359 the driver writes only the interrupt enables PSC_TOP_INT_CON0 bits 0/2, not
+ * TOP_RST_MISC: the 10 s long-press reset stays as configured by the bootloader. No HOMEKEY node.
+ */
+
+#include <dt-bindings/input/input.h>
+#include "mt6785-motorola-lisbon.dts"
+
+&pmic {
+	keys {
+		compatible = "mediatek,mt6359-keys";
+
+		power-key {
+			linux,keycodes = <KEY_POWER>;
+		};
+	};
+};

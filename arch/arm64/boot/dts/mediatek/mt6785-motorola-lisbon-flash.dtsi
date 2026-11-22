@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): LEDs on the MT6360 PMU - the rear flash LED on FLED1, used as torch,
+ * and the white status LED on ISINK1.
+ *
+ *  - only channel 1 is the rear flash; channel 2 has no LED fitted and is left out
+ *  - torch current: 175 mA, the torch level of the vendor camera software (torch code 0x0c = 25 mA
+ *    + 12 x 12.5 mA, the same scale as the mainline driver) -> led-max-microamp 175 mA,
+ *    max_brightness 13
+ *  - strobe: hardware timeout 400 ms; the strobe current stays capped at the torch current
+ *  - thermal limit: the LED is a cooling device (13 states = torch levels, state 13 = off) of the
+ *    flash NTC zone (SoC AUXADC channel 5, see ntc.dtsi), so every user (sysfs, logind, strobe) is
+ *    throttled the same way
+ *  - status LED: only ISINK1 is connected; ISINK2, ISINK3 and ISINKML are left out
+ *  - status LED current: the driver maps brightness n to ISNK code n at 2 mA per step (code 12 = 24
+ *    mA). led-max-microamp 8 mA (code 4, CC mode, max_brightness 4) is bright enough for a
+ *    notification blink and modest as a steady light over hours of charging.
+ *  - status LED trigger: none in the DT. The LED (white:status, function "status") is driven from
+ *    user space for notifications and the charge indication, so a default trigger would be replaced
+ *    at once. The power supply triggers are not in the binding's trigger list either.
+ * The driver programs the strobe current to its minimum and the torch off at probe and touches no
+ * charger register. Registering ISINK1 switches it from the charger indicator to software control
+ * (CHRINDSEL).
+ */
+
+#include <dt-bindings/leds/common.h>
+
+&mt6360 {
+	led-controller {
+		compatible = "mediatek,mt6360-led";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led@0 {
+			reg = <0>;
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_WHITE>;
+			led-max-microamp = <8000>;
+		};
+
+		flash_led: led@4 {
+			reg = <4>;
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			function-enumerator = <1>;
+			led-max-microamp = <175000>;
+			flash-max-microamp = <175000>;
+			flash-max-timeout-us = <400000>;
+			#cooling-cells = <2>;
+		};
+	};
+};
