@@ -78,6 +78,22 @@ patternProperties:
       reg:
         enum: [0, 1, 2, 3, 4, 5]
 
+      "#cooling-cells":
+        description:
+          Flash LEDs (reg 4 and 5) only. The LED is a thermal cooling device
+          with as many states as torch brightness levels. Cooling state n
+          lowers the torch limit by n levels and the strobe current in
+          proportion; the highest state switches the LED off.
+        const: 2
+
+    if:
+      properties:
+        reg:
+          enum: [0, 1, 2, 3]
+    then:
+      properties:
+        "#cooling-cells": false
+
 required:
   - compatible
   - "#address-cells"
@@ -177,6 +193,7 @@ examples:
             led-max-microamp = <200000>;
             flash-max-microamp = <500000>;
             flash-max-timeout-us = <1024000>;
+            #cooling-cells = <2>;
         };
         led@5 {
             reg = <5>;
