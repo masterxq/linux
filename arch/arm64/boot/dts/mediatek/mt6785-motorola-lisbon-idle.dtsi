@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): PSCI CPU idle state "cpu-off" (CPU power down via CPU_SUSPEND).
+ *
+ * arm,psci-suspend-param 0x10001, entry/exit 600 us, min-residency 1200 us, as in the vendor DT;
+ * same parameter as cpu-off on mt8183/mt8186. local-timer-stop: power-down state, the core timer
+ * stops (broadcast through the systimer).
+ * Not described: cluster off (0x1010001, coordinated with the SSPM) and the SPM states from
+ * 0x1010002 on (need SPM firmware and SiP calls).
+ *
+ * The state is registered disabled (cpuidle_psci.states_on=0) and enabled at runtime through sysfs.
+ */
+
+/ {
+	idle-states {
+		entry-method = "psci";
+
+		cpu_off: cpu-off {
+			compatible = "arm,idle-state";
+			arm,psci-suspend-param = <0x00010001>;
+			local-timer-stop;
+			entry-latency-us = <600>;
+			exit-latency-us = <600>;
+			min-residency-us = <1200>;
+		};
+	};
+};
+
+&cpu0 { cpu-idle-states = <&cpu_off>; };
+&cpu1 { cpu-idle-states = <&cpu_off>; };
+&cpu2 { cpu-idle-states = <&cpu_off>; };
+&cpu3 { cpu-idle-states = <&cpu_off>; };
+&cpu4 { cpu-idle-states = <&cpu_off>; };
+&cpu5 { cpu-idle-states = <&cpu_off>; };
+&cpu6 { cpu-idle-states = <&cpu_off>; };
+&cpu7 { cpu-idle-states = <&cpu_off>; };

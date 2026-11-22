@@ -1,0 +1,252 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): the six board NTCs on the SoC AUXADC as thermal zones. The flash NTC
+ * and the BTS NTC have cooling: both limit the rear flash LED (flash.dtsi).
+ *
+ *  - channels: 0 BTS, 1 BTSMDPA, 2 BTSNRPA, 3 BQTHERM (charge pumps), 4 WTCHARGER, 5 FLASHLIGHT.
+ *    All six read 28..30 C at room temperature.
+ *  - every channel: 100 kOhm NTC NCP15WF104F03RC, pull-up 390 kOhm to 1.8 V. Table below: V = 1800
+ *    mV * R / (R + 390 kOhm), every 5 C, rounded to 1 mV. The AUXADC full range is 1.5 V, so
+ *    readings below about -28 C clip.
+ *  - channel 2 is also used by the modem (md_auxadc).
+ * The AUXADC efuse calibration is not applied (error estimated at around 1 C at room temperature).
+ *
+ * Flash LED limit (thresholds chosen with margin): from 50 C the torch is stepped down (cooling
+ * states 1-12, at most one 12.5 mA step per second while the temperature rises, down to 25 mA); at
+ * 60 C the LED is switched off until the sensor is below 55 C again. 300 s of torch at 175 mA warm
+ * the sensor by less than 1 C at room temperature, so both trips only act when the device is
+ * already hot.
+ *
+ * Because the flash NTC barely sees the LED, the board NTC (BTS) limits it as well: from 54 C the
+ * torch is stepped down (cooling states 1-12, at most one step per 2 s poll while the board warms
+ * up), released below 52 C. This trip never switches the LED off: at 25 mA it adds little heat to
+ * the board, and the off state stays with the flash NTC (60 C) next to the LED. The cooling device
+ * takes the higher request of both zones.
+ */
+
+/ {
+	ntc_bts: thermal-sensor-ntc-bts {
+		/* channel 0: BTS */
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&auxadc 0>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-20000) 1344  (-15000) 1232  (-10000) 1111  (-5000) 985
+			0 860  5000 740  10000 629  15000 530
+			20000 442  25000 367  30000 304  35000 251
+			40000 207  45000 171  50000 141  55000 117
+			60000 97  65000 81  70000 67  75000 56
+			80000 47  85000 40  90000 34  95000 29
+			100000 25  105000 21  110000 18  115000 15
+			120000 13  125000 12>;
+	};
+
+	ntc_mdpa: thermal-sensor-ntc-mdpa {
+		/* channel 1: BTSMDPA (modem PA area) */
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&auxadc 1>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-20000) 1344  (-15000) 1232  (-10000) 1111  (-5000) 985
+			0 860  5000 740  10000 629  15000 530
+			20000 442  25000 367  30000 304  35000 251
+			40000 207  45000 171  50000 141  55000 117
+			60000 97  65000 81  70000 67  75000 56
+			80000 47  85000 40  90000 34  95000 29
+			100000 25  105000 21  110000 18  115000 15
+			120000 13  125000 12>;
+	};
+
+	ntc_nrpa: thermal-sensor-ntc-nrpa {
+		/* channel 2: BTSNRPA (PA area) */
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&auxadc 2>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-20000) 1344  (-15000) 1232  (-10000) 1111  (-5000) 985
+			0 860  5000 740  10000 629  15000 530
+			20000 442  25000 367  30000 304  35000 251
+			40000 207  45000 171  50000 141  55000 117
+			60000 97  65000 81  70000 67  75000 56
+			80000 47  85000 40  90000 34  95000 29
+			100000 25  105000 21  110000 18  115000 15
+			120000 13  125000 12>;
+	};
+
+	ntc_bq: thermal-sensor-ntc-bq {
+		/* channel 3: BQTHERM (charge pumps) */
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&auxadc 3>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-20000) 1344  (-15000) 1232  (-10000) 1111  (-5000) 985
+			0 860  5000 740  10000 629  15000 530
+			20000 442  25000 367  30000 304  35000 251
+			40000 207  45000 171  50000 141  55000 117
+			60000 97  65000 81  70000 67  75000 56
+			80000 47  85000 40  90000 34  95000 29
+			100000 25  105000 21  110000 18  115000 15
+			120000 13  125000 12>;
+	};
+
+	ntc_wtchg: thermal-sensor-ntc-wtchg {
+		/* channel 4: WTCHARGER */
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&auxadc 4>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-20000) 1344  (-15000) 1232  (-10000) 1111  (-5000) 985
+			0 860  5000 740  10000 629  15000 530
+			20000 442  25000 367  30000 304  35000 251
+			40000 207  45000 171  50000 141  55000 117
+			60000 97  65000 81  70000 67  75000 56
+			80000 47  85000 40  90000 34  95000 29
+			100000 25  105000 21  110000 18  115000 15
+			120000 13  125000 12>;
+	};
+
+	ntc_flash: thermal-sensor-ntc-flash {
+		/* channel 5: FLASHLIGHT (flash LED) */
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		io-channels = <&auxadc 5>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-20000) 1344  (-15000) 1232  (-10000) 1111  (-5000) 985
+			0 860  5000 740  10000 629  15000 530
+			20000 442  25000 367  30000 304  35000 251
+			40000 207  45000 171  50000 141  55000 117
+			60000 97  65000 81  70000 67  75000 56
+			80000 47  85000 40  90000 34  95000 29
+			100000 25  105000 21  110000 18  115000 15
+			120000 13  125000 12>;
+	};
+
+	thermal-zones {
+		ntc-bts-thermal {
+			polling-delay = <10000>;
+			polling-delay-passive = <2000>;
+			thermal-sensors = <&ntc_bts>;
+
+			trips {
+				ntc_bts_flash: ntc-bts-flash {
+					temperature = <54000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				ntc-bts-hot {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+
+			cooling-maps {
+				map-bts-flash {
+					trip = <&ntc_bts_flash>;
+					cooling-device = <&flash_led 0 12>;
+				};
+			};
+		};
+
+		ntc-mdpa-thermal {
+			polling-delay = <10000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&ntc_mdpa>;
+
+			trips {
+				ntc-mdpa-hot {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+		};
+
+		ntc-nrpa-thermal {
+			polling-delay = <10000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&ntc_nrpa>;
+
+			trips {
+				ntc-nrpa-hot {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+		};
+
+		ntc-bq-thermal {
+			polling-delay = <10000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&ntc_bq>;
+
+			trips {
+				ntc-bq-hot {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+		};
+
+		ntc-wtchg-thermal {
+			polling-delay = <10000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&ntc_wtchg>;
+
+			trips {
+				ntc-wtchg-hot {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+		};
+
+		ntc-flash-thermal {
+			polling-delay = <10000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&ntc_flash>;
+
+			trips {
+				ntc_flash_warm: ntc-flash-warm {
+					temperature = <50000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				ntc_flash_off: ntc-flash-off {
+					temperature = <60000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
+				ntc-flash-hot {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+
+			cooling-maps {
+				map-flash-warm {
+					trip = <&ntc_flash_warm>;
+					cooling-device = <&flash_led 0 12>;
+				};
+
+				map-flash-off {
+					trip = <&ntc_flash_off>;
+					cooling-device = <&flash_led 13 13>;
+				};
+			};
+		};
+	};
+};

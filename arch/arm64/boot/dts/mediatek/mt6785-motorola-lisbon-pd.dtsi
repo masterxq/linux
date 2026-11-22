@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): power domains (SPM), taking over the state left by the bootloader.
+ *
+ * lisbon-common.dtsi keeps &spm disabled so that the MM domain used for the boot picture stays
+ * untouched. Without "mediatek,keep-boot-state" the mtk-pm-domains driver runs the power-on
+ * sequence for every domain at probe; it would then fail at mfg_async (no domain-supply) and switch
+ * the domains it had already powered off again, md included. With the property the driver only
+ * reads PWR_STATUS/PWR_STATUS_2ND:
+ *  - on at boot (md, mm): registered as always-on, never switched off by Linux, no clock/regulator
+ *    touched
+ *  - off at boot (audio, conn, cam, isp, vdec, venc): registered as off, powered on by the first
+ *    user
+ * Not registered at all: md (no user in Linux) and the mfg tree (needs the vgpu supply, see
+ * gpu.dtsi).
+ * cam/isp/vdec/venc are child nodes of mm and are always registered by the driver (it walks child
+ * domains without checking status).
+ */
+
+&spm {
+	mediatek,keep-boot-state;
+	status = "okay";
+};
+
+/* md (MT6785_POWER_DOMAIN_MD = 4) */
+&{/soc/syscon@10006000/power-controller/power-domain@4} {
+	status = "disabled";
+};
+
+&mfg_async {
+	status = "disabled";
+};
