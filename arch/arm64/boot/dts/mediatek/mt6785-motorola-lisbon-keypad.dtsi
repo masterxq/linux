@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): volume-down key on the SoC keypad and the fourth side key (assistant
+ * key) on GPIO15. Power and volume-up are PMIC keys (keys.dtsi).
+ *
+ * Volume down:
+ *  - KEY_VOLUMEDOWN is at index 1 of the 8 rows x 9 columns key matrix, i.e. row 0, column 1.
+ *    Debounce 0x400 in 1/32 ms = 32 ms.
+ *  - pins: GPIO60 KPCOL1, mode 1, pull-up. GPIO59 (KPCOL0) is unused; GPIO58 (KPROW0) is not
+ *    touched here. GPIO15 and GPIO60 have R1/R0 pull resistors, which take no plain bias-pull-up;
+ *    the pull-ups set by the bootloader stay.
+ *  - the mainline driver decodes the five KP_MEM registers as 9 keys per row, so the keymap must be
+ *    8 x 9 even though only one key exists: the scan code of key 71 is row 7.
+ *
+ * Fourth key: GPIO15, active low. Described as gpio-keys with the EINT of GPIO15 instead of
+ * polling, reporting KEY_ASSISTANT.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+&pio {
+	keypad_pins: keypad-pins {
+		pins-col {
+			pinmux = <PINMUX_GPIO60__FUNC_KPCOL1>;
+			input-enable;
+		};
+	};
+
+	assistant_key_pins: assistant-key-pins {
+		pins-key {
+			pinmux = <PINMUX_GPIO15__FUNC_GPIO15>;
+			input-enable;
+		};
+	};
+};
+
+&keypad {
+	pinctrl-names = "default";
+	pinctrl-0 = <&keypad_pins>;
+	keypad,num-rows = <8>;
+	keypad,num-columns = <9>;
+	debounce-delay-ms = <32>;
+	linux,keymap = <MATRIX_KEY(0, 1, KEY_VOLUMEDOWN)>;
+	status = "okay";
+};
+
+/ {
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&assistant_key_pins>;
+
+		key-assistant {
+			label = "Assistant";
+			gpios = <&pio 15 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_ASSISTANT>;
+			debounce-interval = <20>;
+		};
+	};
+};

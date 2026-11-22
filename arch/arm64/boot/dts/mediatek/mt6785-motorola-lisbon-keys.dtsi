@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): keys on the MT6359 PMIC (mtk-pmic-keys).
+ *
+ * Key mapping:
+ *   KEY_POWER      -> PMIC PWRKEY
+ *   KEY_VOLUMEUP   -> PMIC HOMEKEY
+ *   KEY_VOLUMEDOWN -> SoC keypad (keypad.dtsi)
+ *
+ * The driver writes only the interrupt enables PSC_TOP_INT_CON0 bits 0-3 for MT6359; the long-press
+ * reset setup (TOP_RST_MISC) is left as the bootloader configured it.
+ */
+
+#include <dt-bindings/input/input.h>
+
+&pmic {
+	keys {
+		compatible = "mediatek,mt6359-keys";
+
+		power-key {
+			linux,keycodes = <KEY_POWER>;
+		};
+
+		home-key {
+			linux,keycodes = <KEY_VOLUMEUP>;
+		};
+	};
+};

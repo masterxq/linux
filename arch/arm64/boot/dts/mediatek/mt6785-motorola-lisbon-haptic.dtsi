@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): vibration motor as force-feedback input device (regulator-haptic).
+ *
+ * The motor is supplied by the MT6359 LDO VIBR at 2.8 V (RG_VIBR_VOSEL 9); the LDO is already fixed
+ * to 2.8 V in pmic.dts. The motor is a simple on/off load, so min = max = 2.8 V (every FF_RUMBLE
+ * strength runs it at that voltage).
+ *
+ * The "vibrator" regulator-output node stays; both consumers share the LDO through the regulator
+ * reference count.
+ */
+
+/ {
+	haptic {
+		compatible = "regulator-haptic";
+		haptic-supply = <&mt6359_vibr_ldo_reg>;
+		min-microvolt = <2800000>;
+		max-microvolt = <2800000>;
+	};
+};
