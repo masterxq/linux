@@ -824,11 +824,37 @@ config VIDEO_S5K3M5
 	  To compile this driver as a module, choose M here: the
 	  module will be called s5k3m5.
 
+config VIDEO_S5K4H7
+	tristate "Samsung S5K4H7 sensor support"
+	depends on MULTIPLEXER || !MULTIPLEXER
+	select CRC16
+	select V4L2_CCI_I2C
+	help
+	  This is a V4L2 sensor driver for the Samsung S5K4H7 8 MP raw
+	  camera sensor. The calibration data in the one-time programmable
+	  memory of the sensor is offered as an nvmem device.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5k4h7.
+
 config VIDEO_S5K5BAF
 	tristate "Samsung S5K5BAF sensor support"
 	help
 	  This is a V4L2 sensor driver for Samsung S5K5BAF 2M
 	  camera sensor with an embedded SoC image signal processor.
+
+config VIDEO_S5K5E9
+	tristate "Samsung S5K5E9 sensor support"
+	depends on MULTIPLEXER || !MULTIPLEXER
+	select CRC16
+	select V4L2_CCI_I2C
+	help
+	  This is a V4L2 sensor driver for the Samsung S5K5E9 5 MP raw
+	  camera sensor. The calibration data in the one-time programmable
+	  memory of the sensor is offered as an nvmem device.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5k5e9.
 
 config VIDEO_S5K6A3
 	tristate "Samsung S5K6A3 sensor support"
