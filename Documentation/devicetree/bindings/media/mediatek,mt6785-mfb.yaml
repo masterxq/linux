@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/mediatek,mt6785-mfb.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 multi-frame blending block (MFB)
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description:
+  The MFB block of the MT6785 image signal processor blends a reference
+  image into a base image under control of a per-pixel weight map and
+  writes the blended image and the updated weight map, from memory to
+  memory, through the IOMMU on three ports of SMI larb5. Multi-frame noise
+  reduction runs it once per additional frame.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-mfb
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: MFB clock
+
+  clock-names:
+    items:
+      - const: mfb
+
+  iommus:
+    maxItems: 3
+    description:
+      The larb5 ports of the MFB (RDMA0, RDMA1, WDMA), see
+      include/dt-bindings/memory/mediatek,mt6785-memory-port.h.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - power-domains
+  - clocks
+  - clock-names
+  - iommus
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/memory/mediatek,mt6785-memory-port.h>
+    #include <dt-bindings/power/mediatek,mt6785-power.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        mfb@1502e000 {
+            compatible = "mediatek,mt6785-mfb";
+            reg = <0 0x1502e000 0 0x1000>;
+            interrupts = <GIC_SPI 300 IRQ_TYPE_LEVEL_LOW>;
+            clocks = <&imgsys CLK_IMG_MFB>;
+            clock-names = "mfb";
+            power-domains = <&spm MT6785_POWER_DOMAIN_ISP>;
+            iommus = <&iommu M4U_PORT_IMG_MFB_RDMA0>,
+                     <&iommu M4U_PORT_IMG_MFB_RDMA1>,
+                     <&iommu M4U_PORT_IMG_MFB_WDMA>;
+        };
+    };
+...
