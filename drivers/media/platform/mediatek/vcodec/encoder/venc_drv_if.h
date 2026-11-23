@@ -68,6 +68,9 @@ enum venc_set_param_type {
  * @input_fourcc: input yuv format
  * @h264_profile: V4L2 defined H.264 profile
  * @h264_level: V4L2 defined H.264 level
+ * @hevc_profile: V4L2 defined HEVC profile
+ * @hevc_level: V4L2 defined HEVC level
+ * @hevc_tier: V4L2 defined HEVC tier
  * @width: image width
  * @height: image height
  * @buf_width: buffer width
@@ -76,11 +79,22 @@ enum venc_set_param_type {
  * @intra_period: intra frame period
  * @bitrate: target bitrate in bps
  * @gop_size: group of picture size
+ * @framerate_num: frame rate numerator
+ * @framerate_denom: frame rate denominator
+ * @rc_frame: frame based rate control, else fixed QP
+ * @min_qp: lowest QP of the rate control
+ * @max_qp: highest QP of the rate control
+ * @i_qp: QP of I frames without rate control
+ * @p_qp: QP of P frames without rate control
+ * @prepend_sps_pps_idr: put SPS and PPS before every IDR frame
  */
 struct venc_enc_param {
 	enum venc_yuv_fmt input_yuv_fmt;
 	unsigned int h264_profile;
 	unsigned int h264_level;
+	unsigned int hevc_profile;
+	unsigned int hevc_level;
+	unsigned int hevc_tier;
 	unsigned int width;
 	unsigned int height;
 	unsigned int buf_width;
@@ -89,6 +103,14 @@ struct venc_enc_param {
 	unsigned int intra_period;
 	unsigned int bitrate;
 	unsigned int gop_size;
+	unsigned int framerate_num;
+	unsigned int framerate_denom;
+	bool rc_frame;
+	unsigned int min_qp;
+	unsigned int max_qp;
+	unsigned int i_qp;
+	unsigned int p_qp;
+	bool prepend_sps_pps_idr;
 };
 
 /**
@@ -123,6 +145,8 @@ struct venc_done_result {
 };
 
 extern const struct venc_common_if venc_h264_if;
+extern const struct venc_common_if venc_h264_reg_if;
+extern const struct venc_common_if venc_hevc_reg_if;
 extern const struct venc_common_if venc_vp8_if;
 
 /*
