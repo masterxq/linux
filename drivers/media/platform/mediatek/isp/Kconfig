@@ -49,3 +49,34 @@ config MTK_SENINF30_KUNIT_TEST
 	  stream are refused, and the other streams can still be configured.
 
 	  If unsure, say N.
+
+config MTK_DIP_MT6785
+	tristate "MediaTek MT6785 ISP pass 2 (DIP) driver"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	depends on PM
+	depends on VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select V4L2_ISP
+	select VIDEOBUF2_DMA_CONTIG
+	select VIDEOBUF2_VMALLOC
+	help
+	  Memory-to-memory driver for the second pass (DIP) of the MT6785
+	  image signal processor: turns raw Bayer frames into NV12 with
+	  black level, white balance, noise reduction, demosaicing, colour
+	  matrix and gamma, controlled through a parameter buffer, and into
+	  a second, down-scaled YUYV output.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called mtk-dip-mt6785.
+
+config MTK_DIP_MT6785_KUNIT_TEST
+	bool "KUnit tests of the MT6785 DIP driver" if !KUNIT_ALL_TESTS
+	depends on MTK_DIP_MT6785 && KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Checks the tile descriptions of the MT6785 DIP driver against
+	  reference blocks of an independent implementation, and the
+	  translation of its parameter blocks. The tests run when the driver
+	  is loaded.
+
