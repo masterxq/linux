@@ -47,6 +47,20 @@
 			MT6785_INFRA_TOPAXI_PROTECTEN_MM_CLR,		\
 			MT6785_INFRA_TOPAXI_PROTECTEN_MM_STA1)
 
+/*
+ * The CAM and ISP paths towards the VPU (TOPAXI_MM bits 11 and 10) only
+ * acknowledge their protection while VPU_CONN (PWR_STATUS bit 27) is powered;
+ * the vendor sequences wait for the acknowledge only in that case.
+ */
+#define MT6785_PWR_STATUS_VPU_CONN BIT(27)
+
+#define MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM_IF_VPU(_mask)		\
+	BUS_PROT_WR_IGN_ACK_IF_ON(INFRA, _mask,				\
+				  MT6785_INFRA_TOPAXI_PROTECTEN_MM_SET,	\
+				  MT6785_INFRA_TOPAXI_PROTECTEN_MM_CLR,	\
+				  MT6785_INFRA_TOPAXI_PROTECTEN_MM_STA1,	\
+				  MT6785_PWR_STATUS_VPU_CONN)
+
 #define MT6785_BUS_PROT_SMI_WR_CLAMP_EN(_mask)				\
 	BUS_PROT_WR_IGN(SMI, _mask,					\
 			MT6785_SMI_COMMON_CLAMP_EN_SET,			\
@@ -82,12 +96,13 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6785[] = {
 		.bp_cfg = {
 			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM(BIT(4) | BIT(5) | BIT(9) | BIT(13)),
 			MT6785_BUS_PROT_INFRA_WR_TOPAXI(BIT(28)),
-			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM(BIT(11)),
+			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM_IF_VPU(BIT(11)),
 			MT6785_BUS_PROT_SMI_WR_CLAMP_EN(GENMASK(7, 6)),
 		},
 	},
 	[MT6785_POWER_DOMAIN_CONN] = {
 		.name = "conn",
+		.caps = MTK_SCPD_ACTIVE_WAKEUP,
 		.sta_mask = BIT(1),
 		.ctl_offs = 0x320,
 		.pwr_sta_offs = MT6785_PWR_STATUS,
@@ -108,9 +123,14 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6785[] = {
 		.sram_pdn_ack_bits = GENMASK(12, 12),
 		.bp_cfg = {
 			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM(BIT(3) | BIT(8)),
+			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM_IF_VPU(BIT(10)),
 			MT6785_BUS_PROT_SMI_WR_CLAMP_EN(BIT(4)),
-			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM(BIT(10)),
 		},
+		/*
+		 * The IMGSYS larb gates (subsys clocks) open after the bus
+		 * protection is released, as in the vendor sequence.
+		 */
+		.caps = MTK_SCPD_STRICT_BUS_PROTECTION,
 	},
 	[MT6785_POWER_DOMAIN_MD] = {
 		.name = "md",
@@ -227,6 +247,11 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6785[] = {
 			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM(BIT(1)),
 			MT6785_BUS_PROT_SMI_WR_CLAMP_EN(BIT(2)),
 		},
+		/*
+		 * The VDECSYS larb gate (subsys clock) opens after the bus
+		 * protection is released, as the VENCSYS gates do.
+		 */
+		.caps = MTK_SCPD_STRICT_BUS_PROTECTION,
 	},
 	[MT6785_POWER_DOMAIN_VENC] = {
 		.name = "venc",
@@ -240,6 +265,11 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6785[] = {
 			MT6785_BUS_PROT_INFRA_WR_TOPAXI_MM(BIT(0)),
 			MT6785_BUS_PROT_SMI_WR_CLAMP_EN(BIT(3)),
 		},
+		/*
+		 * The VENCSYS gates (subsys clocks) open after the bus
+		 * protection is released, as in the vendor sequence.
+		 */
+		.caps = MTK_SCPD_STRICT_BUS_PROTECTION,
 	},
 };
 

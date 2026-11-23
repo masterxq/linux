@@ -57,6 +57,7 @@ enum scpsys_bus_prot_flags {
 	BUS_PROT_IGNORE_CLR_ACK = BIT(2),
 	BUS_PROT_INVERTED = BIT(3),
 	BUS_PROT_IGNORE_SUBCLK = BIT(4),
+	BUS_PROT_SET_ACK_IF_PWR_ON = BIT(5),
 };
 
 enum scpsys_bus_prot_block {
@@ -78,6 +79,27 @@ enum scpsys_bus_prot_block {
 		.bus_prot_sta_mask = (_sta_mask),			\
 		.bus_prot_sta = _sta,					\
 		.flags = _flags						\
+	}
+
+/*
+ * Like BUS_PROT_WR_IGN, but the set acknowledge is only awaited while the
+ * power domains in _pwr_sta_mask (bits of the domain's PWR_STATUS register)
+ * are on: the other end of the protected path only acknowledges when it is
+ * powered.
+ */
+#define BUS_PROT_WR_IGN_ACK_IF_ON(_hwip, _mask, _set, _clr, _sta,	\
+				  _pwr_sta_mask)			\
+	{								\
+		.bus_prot_block = BUS_PROT_BLOCK_##_hwip,		\
+		.bus_prot_sta_block = BUS_PROT_BLOCK_##_hwip,		\
+		.bus_prot_set_clr_mask = (_mask),			\
+		.bus_prot_set = _set,					\
+		.bus_prot_clr = _clr,					\
+		.bus_prot_sta_mask = (_mask),				\
+		.bus_prot_sta = _sta,					\
+		.set_ack_pwr_sta_mask = (_pwr_sta_mask),		\
+		.flags = BUS_PROT_IGNORE_CLR_ACK |			\
+			 BUS_PROT_SET_ACK_IF_PWR_ON			\
 	}
 
 #define _BUS_PROT(_hwip, _set_clr_mask, _set, _clr, _sta_mask,		\
@@ -114,6 +136,7 @@ struct scpsys_bus_prot_data {
 	u32 bus_prot_clr;
 	u32 bus_prot_sta_mask;
 	u32 bus_prot_sta;
+	u32 set_ack_pwr_sta_mask;
 	u8 flags;
 };
 

@@ -77,10 +77,21 @@ struct scpsys {
 	u8 bus_prot_index[BUS_PROT_BLOCK_COUNT];
 	struct regmap **bus_prot;
 	struct genpd_onecell_data pd_data;
+	bool keep_boot_state;
 	struct generic_pm_domain *domains[];
 };
 
 #define to_scpsys_domain(gpd) container_of(gpd, struct scpsys_domain, genpd)
+
+/*
+ * hold: do not probe at boot. The device stays unbound until hold is cleared
+ * and the probe is triggered through /sys/bus/platform/drivers_probe, so the
+ * probe runs in process context after boot (a fault there does not stop the
+ * boot). Meant for bringing up mediatek,keep-boot-state on new boards.
+ */
+static bool hold;
+module_param(hold, bool, 0644);
+MODULE_PARM_DESC(hold, "skip probing until cleared, then probe via /sys/bus/platform/drivers_probe");
 
 static bool scpsys_domain_is_on(struct scpsys_domain *pd)
 {
@@ -247,9 +258,31 @@ static int scpsys_bus_protect_set(struct scpsys_domain *pd,
 	else
 		regmap_write(regmap, bpd->bus_prot_set, bpd->bus_prot_set_clr_mask);
 
+	if (bpd->flags & BUS_PROT_SET_ACK_IF_PWR_ON) {
+		regmap_read(pd->scpsys->base, pd->data->pwr_sta_offs, &val);
+		if ((val & bpd->set_ack_pwr_sta_mask) != bpd->set_ack_pwr_sta_mask)
+			return 0;
+	}
+
 	return regmap_read_poll_timeout(sta_regmap, bpd->bus_prot_sta,
 					val, (val & sta_mask) == sta_mask,
 					MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
+}
+
+/* Name the bus protection step that timed out and show its status register */
+static void scpsys_bus_protect_report(struct scpsys_domain *pd,
+				      const struct scpsys_bus_prot_data *bpd,
+				      int step, bool enable)
+{
+	struct regmap *sta_regmap = scpsys_bus_protect_get_sta_regmap(pd, bpd);
+	unsigned int sta = 0;
+
+	regmap_read(sta_regmap, bpd->bus_prot_sta, &sta);
+	dev_err_ratelimited(pd->scpsys->dev,
+			    "%s: bus protection step %d not %s: mask %#x, status %#x = %#010x\n",
+			    pd->genpd.name, step,
+			    enable ? "acknowledged" : "released",
+			    bpd->bus_prot_sta_mask, bpd->bus_prot_sta, sta);
 }
 
 static int scpsys_bus_protect_enable(struct scpsys_domain *pd, u8 flags)
@@ -269,8 +302,10 @@ static int scpsys_bus_protect_enable(struct scpsys_domain *pd, u8 flags)
 			ret = scpsys_bus_protect_clear(pd, bpd);
 		else
 			ret = scpsys_bus_protect_set(pd, bpd);
-		if (ret)
+		if (ret) {
+			scpsys_bus_protect_report(pd, bpd, i, true);
 			return ret;
+		}
 	}
 
 	return 0;
@@ -293,8 +328,10 @@ static int scpsys_bus_protect_disable(struct scpsys_domain *pd, u8 flags)
 			ret = scpsys_bus_protect_set(pd, bpd);
 		else
 			ret = scpsys_bus_protect_clear(pd, bpd);
-		if (ret)
+		if (ret) {
+			scpsys_bus_protect_report(pd, bpd, i, false);
 			return ret;
+		}
 	}
 
 	return 0;
@@ -695,6 +732,14 @@ err_reg:
 	return ret;
 }
 
+/* Reopen the subsys clocks of a domain that stays on after a failed power-off */
+static void scpsys_subsys_clks_restore(struct scpsys_domain *pd)
+{
+	if (clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks))
+		dev_err_ratelimited(pd->scpsys->dev, "%s: subsys clocks not restored\n",
+				    pd->genpd.name);
+}
+
 static int scpsys_power_off(struct generic_pm_domain *genpd)
 {
 	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
@@ -702,13 +747,23 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 	bool tmp;
 	int ret;
 
+	/*
+	 * genpd keeps a domain whose power-off fails marked on and runs no
+	 * power-on sequence for its next user. Until the power is cut, a
+	 * failed step therefore undoes the steps before it: a bus protection
+	 * or an SRAM power-down left behind would cut off the bus masters of
+	 * a domain that is still on.
+	 */
 	ret = scpsys_bus_protect_enable(pd, 0);
 	if (ret < 0)
-		return ret;
+		goto err_bus_protect;
 
 	ret = scpsys_sram_disable(pd);
-	if (ret < 0)
-		return ret;
+	if (ret < 0) {
+		dev_err_ratelimited(scpsys->dev, "%s: SRAM power-down not acknowledged\n",
+				    genpd->name);
+		goto err_sram;
+	}
 
 	if (pd->data->ext_buck_iso_offs && MTK_SCPD_CAPS(pd, MTK_SCPD_EXT_BUCK_ISO))
 		regmap_set_bits(scpsys->base, pd->data->ext_buck_iso_offs,
@@ -718,7 +773,7 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 
 	ret = scpsys_bus_protect_enable(pd, BUS_PROT_IGNORE_SUBCLK);
 	if (ret < 0)
-		return ret;
+		goto err_subsys_bus_protect;
 
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MODEM_PWRSEQ))
 		scpsys_modem_pwrseq_off(pd);
@@ -728,14 +783,69 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 	/* wait until PWR_ACK = 0 */
 	ret = readx_poll_timeout(scpsys_domain_is_on, pd, tmp, !tmp, MTK_POLL_DELAY_US,
 				 MTK_POLL_TIMEOUT);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err_ratelimited(scpsys->dev, "%s: power acknowledge still set after power-off\n",
+				    genpd->name);
 		return ret;
+	}
 
 	clk_bulk_disable_unprepare(pd->num_clks, pd->clks);
 
 	scpsys_regulator_disable(pd->supply);
 
 	return 0;
+
+err_subsys_bus_protect:
+	/* Back in the order of scpsys_power_on() */
+	scpsys_bus_protect_disable(pd, BUS_PROT_IGNORE_SUBCLK);
+	if (pd->data->ext_buck_iso_offs && MTK_SCPD_CAPS(pd, MTK_SCPD_EXT_BUCK_ISO))
+		regmap_clear_bits(scpsys->base, pd->data->ext_buck_iso_offs,
+				  pd->data->ext_buck_iso_mask);
+	if (!MTK_SCPD_CAPS(pd, MTK_SCPD_STRICT_BUS_PROTECTION))
+		scpsys_subsys_clks_restore(pd);
+	scpsys_sram_enable(pd);
+	scpsys_bus_protect_disable(pd, 0);
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_STRICT_BUS_PROTECTION))
+		scpsys_subsys_clks_restore(pd);
+	return ret;
+err_sram:
+	scpsys_sram_enable(pd);
+err_bus_protect:
+	scpsys_bus_protect_disable(pd, 0);
+	return ret;
+}
+
+/*
+ * A domain the bootloader left on holds what its power-on sequence would
+ * have enabled: its supply, its clocks and its subsys clocks. The hardware
+ * already runs, so this only counts the domain as a user. Without it, a
+ * device that shares one of these clocks (e.g. an SMI common or larb in a
+ * domain that carries the boot display) would switch the clock off on its
+ * first runtime suspend, under the running hardware.
+ */
+static int scpsys_take_boot_on(struct scpsys_domain *pd)
+{
+	int ret;
+
+	ret = scpsys_regulator_enable(pd->supply);
+	if (ret)
+		return ret;
+
+	ret = clk_bulk_prepare_enable(pd->num_clks, pd->clks);
+	if (ret)
+		goto err_reg;
+
+	ret = clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks);
+	if (ret)
+		goto err_clks;
+
+	return 0;
+
+err_clks:
+	clk_bulk_disable_unprepare(pd->num_clks, pd->clks);
+err_reg:
+	scpsys_regulator_disable(pd->supply);
+	return ret;
 }
 
 static struct
@@ -749,6 +859,7 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	int i, ret, num_clks;
 	struct clk *clk;
 	int clk_ind = 0;
+	bool is_off;
 	u32 id;
 
 	ret = of_property_read_u32(node, "reg", &id);
@@ -879,12 +990,28 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	}
 
 	/*
-	 * Initially turn on all domains to make the domains usable
-	 * with !CONFIG_PM and to get the hardware in sync with the
-	 * software.  The unused domains will be switched off during
-	 * late_init time.
+	 * "mediatek,keep-boot-state": take over the state the bootloader left
+	 * instead of running any power sequence at probe. The status registers
+	 * are only read. A domain that is on may carry hardware the bootloader
+	 * still runs (e.g. the display pipeline scanning out the boot picture),
+	 * so it is registered as on and never switched off by Linux. A domain
+	 * that is off is registered as off and powered on by its first user.
 	 */
-	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
+	if (scpsys->keep_boot_state) {
+		is_off = !scpsys_domain_is_on(pd);
+		if (!is_off) {
+			ret = scpsys_take_boot_on(pd);
+			if (ret < 0) {
+				dev_err(scpsys->dev, "%pOF: failed to take the boot state: %d\n",
+					node, ret);
+				goto err_put_subsys_clocks;
+			}
+			pd->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+		}
+		dev_info(scpsys->dev, "%pOF: %s at boot, %s\n", node,
+			 is_off ? "off" : "on",
+			 is_off ? "registered as off" : "kept on (always-on)");
+	} else if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
 		if (scpsys_domain_is_on(pd))
 			dev_warn(scpsys->dev,
 				 "%pOF: A default off power domain has been ON\n", node);
@@ -902,10 +1029,10 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_ACTIVE_WAKEUP))
 		pd->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
 
-	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF))
-		pm_genpd_init(&pd->genpd, NULL, true);
-	else
-		pm_genpd_init(&pd->genpd, NULL, false);
+	if (!scpsys->keep_boot_state)
+		is_off = MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF);
+
+	pm_genpd_init(&pd->genpd, NULL, is_off);
 
 	scpsys->domains[id] = &pd->genpd;
 
@@ -985,7 +1112,11 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 		dev_err(pd->scpsys->dev,
 			"failed to remove domain '%s' : %d - state may be inconsistent\n",
 			pd->genpd.name, ret);
-	if (scpsys_domain_is_on(pd))
+	/*
+	 * keep-boot-state: never switch anything off, not even on errors; a
+	 * domain kept on keeps its supply and clock references
+	 */
+	if (!pd->scpsys->keep_boot_state && scpsys_domain_is_on(pd))
 		scpsys_power_off(&pd->genpd);
 
 	clk_bulk_put(pd->num_clks, pd->clks);
@@ -1221,6 +1352,12 @@ static int scpsys_probe(struct platform_device *pdev)
 	struct scpsys *scpsys;
 	int num_domains, ret;
 
+	if (READ_ONCE(hold)) {
+		dev_info(dev, "held (mtk_pm_domains.hold): echo 0 > /sys/module/mtk_pm_domains/parameters/hold; echo %s > /sys/bus/platform/drivers_probe\n",
+			 dev_name(dev));
+		return -ENODEV;
+	}
+
 	soc = of_device_get_match_data(&pdev->dev);
 	if (!soc) {
 		dev_err(&pdev->dev, "no power controller data\n");
@@ -1235,6 +1372,7 @@ static int scpsys_probe(struct platform_device *pdev)
 
 	scpsys->dev = dev;
 	scpsys->soc_data = soc;
+	scpsys->keep_boot_state = of_property_read_bool(np, "mediatek,keep-boot-state");
 
 	scpsys->pd_data.domains = scpsys->domains;
 	scpsys->pd_data.num_domains = num_domains;
@@ -1249,6 +1387,22 @@ static int scpsys_probe(struct platform_device *pdev)
 	if (IS_ERR(scpsys->base)) {
 		dev_err(dev, "no regmap available\n");
 		return PTR_ERR(scpsys->base);
+	}
+
+	if (scpsys->keep_boot_state) {
+		u32 sta = 0, sta2 = 0;
+		int i;
+
+		/* status registers of the first described domain (same for all on MT6785) */
+		for (i = 0; soc->domains_data && i < soc->num_domains; i++) {
+			if (!soc->domains_data[i].pwr_sta_offs)
+				continue;
+			regmap_read(scpsys->base, soc->domains_data[i].pwr_sta_offs, &sta);
+			regmap_read(scpsys->base, soc->domains_data[i].pwr_sta2nd_offs, &sta2);
+			break;
+		}
+		dev_info(dev, "keeping the bootloader power state: PWR_STATUS 0x%08x, 2ND 0x%08x\n",
+			 sta, sta2);
 	}
 
 	if (of_find_property(np, "access-controllers", NULL))
