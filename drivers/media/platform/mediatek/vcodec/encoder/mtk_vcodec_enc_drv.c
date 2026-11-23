@@ -43,11 +43,57 @@ static const struct mtk_video_fmt mtk_video_formats_output[] = {
 	},
 };
 
+/* encoders without firmware: NV12 and NV21 in one or two planes */
+static const struct mtk_video_fmt mtk_video_formats_output_no_fw[] = {
+	{
+		.fourcc = V4L2_PIX_FMT_NV12M,
+		.type = MTK_FMT_FRAME,
+		.num_planes = 2,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_NV12,
+		.type = MTK_FMT_FRAME,
+		.num_planes = 1,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_NV21M,
+		.type = MTK_FMT_FRAME,
+		.num_planes = 2,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_NV21,
+		.type = MTK_FMT_FRAME,
+		.num_planes = 1,
+	},
+};
+
 static const struct mtk_video_fmt mtk_video_formats_capture_h264[] =  {
 	{
 		.fourcc = V4L2_PIX_FMT_H264,
 		.type = MTK_FMT_ENC,
 		.num_planes = 1,
+	},
+};
+
+/* encoders without firmware: any even height, the core pads the last row */
+static const struct mtk_video_fmt mtk_video_formats_capture_no_fw[] = {
+	{
+		.fourcc = V4L2_PIX_FMT_H264,
+		.type = MTK_FMT_ENC,
+		.num_planes = 1,
+		.frmsize = {
+			MTK_VENC_MIN_W, MTK_VENC_HD_MAX_W, 16,
+			MTK_VENC_MIN_H, MTK_VENC_HD_MAX_H, 2,
+		},
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_HEVC,
+		.type = MTK_FMT_ENC,
+		.num_planes = 1,
+		.frmsize = {
+			MTK_VENC_MIN_W, MTK_VENC_4K_MAX_W, 16,
+			MTK_VENC_MIN_H, MTK_VENC_4K_MAX_H, 2,
+		},
 	},
 };
 
@@ -78,6 +124,9 @@ static void clean_irq_status(unsigned int irq_status, void __iomem *addr)
 
 	if (irq_status & MTK_VENC_IRQ_STATUS_FRM)
 		writel(MTK_VENC_IRQ_STATUS_FRM, addr);
+
+	if (irq_status & MTK_VENC_IRQ_STATUS_VPS)
+		writel(MTK_VENC_IRQ_STATUS_VPS, addr);
 
 }
 static irqreturn_t mtk_vcodec_enc_irq_handler(int irq, void *priv)
@@ -154,7 +203,7 @@ static int fops_vcodec_open(struct file *file)
 	ctx->empty_flush_buf.vb.vb2_buf.vb2_queue = src_vq;
 	mtk_vcodec_enc_set_default_params(ctx);
 
-	if (v4l2_fh_is_singular(&ctx->fh)) {
+	if (v4l2_fh_is_singular(&ctx->fh) && dev->fw_handler) {
 		/*
 		 * load fireware to checks if it was loaded already and
 		 * does nothing in that case
@@ -255,24 +304,29 @@ static int mtk_vcodec_probe(struct platform_device *pdev)
 
 	INIT_LIST_HEAD(&dev->ctx_list);
 	dev->plat_dev = pdev;
-
-	if (!of_property_read_u32(pdev->dev.of_node, "mediatek,vpu",
-				  &rproc_phandle)) {
-		fw_type = VPU;
-	} else if (!of_property_read_u32(pdev->dev.of_node, "mediatek,scp",
-					 &rproc_phandle)) {
-		fw_type = SCP;
-	} else {
-		dev_err(&pdev->dev, "[MTK VCODEC] Could not get venc IPI device");
-		return -ENODEV;
-	}
+	dev->venc_pdata = of_device_get_match_data(&pdev->dev);
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 
-	dev->fw_handler = mtk_vcodec_fw_select(dev, fw_type, ENCODER);
-	if (IS_ERR(dev->fw_handler))
-		return PTR_ERR(dev->fw_handler);
+	/* an encoder that the CPU programs needs no firmware */
+	if (!dev->venc_pdata->no_fw) {
+		if (!of_property_read_u32(pdev->dev.of_node, "mediatek,vpu",
+					  &rproc_phandle)) {
+			fw_type = VPU;
+		} else if (!of_property_read_u32(pdev->dev.of_node,
+						 "mediatek,scp",
+						 &rproc_phandle)) {
+			fw_type = SCP;
+		} else {
+			dev_err(&pdev->dev,
+				"[MTK VCODEC] Could not get venc IPI device");
+			return -ENODEV;
+		}
 
-	dev->venc_pdata = of_device_get_match_data(&pdev->dev);
+		dev->fw_handler = mtk_vcodec_fw_select(dev, fw_type, ENCODER);
+		if (IS_ERR(dev->fw_handler))
+			return PTR_ERR(dev->fw_handler);
+	}
+
 	ret = mtk_vcodec_init_enc_clk(dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "[MTK VCODEC] Failed to get mtk vcodec clock source!");
@@ -382,9 +436,22 @@ err_enc_alloc:
 err_res:
 	pm_runtime_disable(dev->pm.dev);
 err_enc_pm:
-	mtk_vcodec_fw_release(dev->fw_handler);
+	if (dev->fw_handler)
+		mtk_vcodec_fw_release(dev->fw_handler);
 	return ret;
 }
+
+/* MT6785: H.264 and HEVC encoder programmed by the CPU */
+static const struct mtk_vcodec_enc_pdata mt6785_pdata = {
+	.capture_formats = mtk_video_formats_capture_no_fw,
+	.num_capture_formats = ARRAY_SIZE(mtk_video_formats_capture_no_fw),
+	.output_formats = mtk_video_formats_output_no_fw,
+	.num_output_formats = ARRAY_SIZE(mtk_video_formats_output_no_fw),
+	.min_bitrate = 64,
+	.max_bitrate = 50000000,
+	.core_id = VENC_SYS,
+	.no_fw = true,
+};
 
 static const struct mtk_vcodec_enc_pdata mt8173_avc_pdata = {
 	.capture_formats = mtk_video_formats_capture_h264,
@@ -452,6 +519,7 @@ static const struct mtk_vcodec_enc_pdata mt8195_pdata = {
 };
 
 static const struct of_device_id mtk_vcodec_enc_match[] = {
+	{.compatible = "mediatek,mt6785-vcodec-enc", .data = &mt6785_pdata},
 	{.compatible = "mediatek,mt8173-vcodec-enc",
 			.data = &mt8173_avc_pdata},
 	{.compatible = "mediatek,mt8173-vcodec-enc-vp8",
@@ -478,7 +546,8 @@ static void mtk_vcodec_enc_remove(struct platform_device *pdev)
 	mtk_vcodec_dbgfs_deinit(&dev->dbgfs);
 	v4l2_device_unregister(&dev->v4l2_dev);
 	pm_runtime_disable(dev->pm.dev);
-	mtk_vcodec_fw_release(dev->fw_handler);
+	if (dev->fw_handler)
+		mtk_vcodec_fw_release(dev->fw_handler);
 }
 
 static struct platform_driver mtk_vcodec_enc_driver = {

@@ -16,6 +16,7 @@
 
 #define MTK_ENC_CTX_IS_EXT(ctx) ((ctx)->dev->venc_pdata->uses_ext)
 #define MTK_ENC_IOVA_IS_34BIT(ctx) ((ctx)->dev->venc_pdata->uses_34bit)
+#define MTK_ENC_CTX_NO_FW(ctx) ((ctx)->dev->venc_pdata->no_fw)
 
 /**
  * struct mtk_vcodec_enc_pdata - compatible data for each IC
@@ -29,6 +30,8 @@
  * @num_output_formats: number of entries in output_formats
  * @core_id: stand for h264 or vp8 encode index
  * @uses_34bit: whether the encoder uses 34-bit iova
+ * @no_fw: the CPU programs the encoder through its registers, without
+ *	   firmware and coprocessor
  */
 struct mtk_vcodec_enc_pdata {
 	bool uses_ext;
@@ -40,6 +43,7 @@ struct mtk_vcodec_enc_pdata {
 	size_t num_output_formats;
 	u8 core_id;
 	bool uses_34bit;
+	bool no_fw;
 };
 
 /*
@@ -69,8 +73,19 @@ enum mtk_encode_param {
  * @framerate_denom: frame rate denominator. ex: framerate_num=30 and
  *		     framerate_denom=1 means FPS is 30
  * @h264_max_qp: Max value for H.264 quantization parameter
+ * @h264_min_qp: Min value for H.264 quantization parameter
+ * @h264_i_qp: H.264 quantization parameter of I frames without rate control
+ * @h264_p_qp: H.264 quantization parameter of P frames without rate control
+ * @prepend_sps_pps_idr: put SPS and PPS before every IDR frame
  * @h264_profile: V4L2 defined H.264 profile
  * @h264_level: V4L2 defined H.264 level
+ * @hevc_max_qp: highest HEVC quantization parameter
+ * @hevc_min_qp: lowest HEVC quantization parameter
+ * @hevc_i_qp: HEVC quantization parameter of I frames without rate control
+ * @hevc_p_qp: HEVC quantization parameter of P frames without rate control
+ * @hevc_profile: V4L2 defined HEVC profile
+ * @hevc_level: V4L2 defined HEVC level
+ * @hevc_tier: V4L2 defined HEVC tier
  * @force_intra: force/insert intra frame
  */
 struct mtk_enc_params {
@@ -84,8 +99,19 @@ struct mtk_enc_params {
 	unsigned int	framerate_num;
 	unsigned int	framerate_denom;
 	unsigned int	h264_max_qp;
+	unsigned int	h264_min_qp;
+	unsigned int	h264_i_qp;
+	unsigned int	h264_p_qp;
+	unsigned int	prepend_sps_pps_idr;
 	unsigned int	h264_profile;
 	unsigned int	h264_level;
+	unsigned int	hevc_max_qp;
+	unsigned int	hevc_min_qp;
+	unsigned int	hevc_i_qp;
+	unsigned int	hevc_p_qp;
+	unsigned int	hevc_profile;
+	unsigned int	hevc_level;
+	unsigned int	hevc_tier;
 	unsigned int	force_intra;
 };
 
@@ -116,6 +142,9 @@ struct mtk_enc_params {
  * @encode_work: worker for the encoding
  * @empty_flush_buf: a fake size-0 capture buffer that indicates flush. Used for encoder.
  * @is_flushing: set to true if flushing is in progress.
+ * @out_seq: sequence number of the next output buffer
+ * @cap_seq: sequence number of the next capture buffer
+ * @coded_fmt_set: the client has set the coded format
  *
  * @colorspace: enum v4l2_colorspace; supplemental to pixelformat
  * @ycbcr_enc: enum v4l2_ycbcr_encoding, Y'CbCr encoding
@@ -150,6 +179,9 @@ struct mtk_vcodec_enc_ctx {
 	struct work_struct encode_work;
 	struct v4l2_m2m_buffer empty_flush_buf;
 	bool is_flushing;
+	u32 out_seq;
+	u32 cap_seq;
+	bool coded_fmt_set;
 
 	enum v4l2_colorspace colorspace;
 	enum v4l2_ycbcr_encoding ycbcr_enc;

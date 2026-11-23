@@ -19,9 +19,17 @@
 #define MTK_VENC_IRQ_STATUS_DRAM	0x8
 #define MTK_VENC_IRQ_STATUS_PAUSE	0x10
 #define MTK_VENC_IRQ_STATUS_SWITCH	0x20
+#define MTK_VENC_IRQ_STATUS_VPS	0x80
 
 #define MTK_VENC_IRQ_STATUS_OFFSET	0x05C
 #define MTK_VENC_IRQ_ACK_OFFSET	0x060
+
+#define MTK_VENC_MIN_W	160U
+#define MTK_VENC_MIN_H	128U
+#define MTK_VENC_HD_MAX_W	1920U
+#define MTK_VENC_HD_MAX_H	1088U
+#define MTK_VENC_4K_MAX_W	3840U
+#define MTK_VENC_4K_MAX_H	2176U
 
 /**
  * struct mtk_video_enc_buf - Private data related to each VB2 buffer.
