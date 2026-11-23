@@ -475,6 +475,16 @@ config VIDEO_OV13B10
 	  This is a Video4Linux2 sensor driver for the OmniVision
 	  OV13B10 camera.
 
+config VIDEO_OV16A1Q
+	tristate "OmniVision OV16A1Q sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the OmniVision
+	  OV16A1Q camera (16 MP quad Bayer, binned 2304x1728 mode).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ov16a1q.
+
 config VIDEO_OV2640
 	tristate "OmniVision OV2640 sensor support"
 	help
@@ -652,6 +662,16 @@ config VIDEO_OV64A40
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ov64a40.
+
+config VIDEO_OV64B40
+	tristate "OmniVision OV64B40 sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the OmniVision
+	  OV64B40 camera (64 MP quad Bayer, binned 4624x3472 mode).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ov64b40.
 
 config VIDEO_OV7251
 	tristate "OmniVision OV7251 sensor support"
