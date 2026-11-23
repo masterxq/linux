@@ -26,6 +26,26 @@
 		rdma1 = &rdma1;
 	};
 
+	/*
+	 * Bluetooth part of the consys: no registers of its own, HCI travels over the BTIF/STP
+	 * link of the consys node.
+	 */
+	bluetooth: bluetooth {
+		compatible = "mediatek,mt6785-bluetooth";
+		mediatek,consys = <&consys>;
+		status = "disabled";
+	};
+
+	/*
+	 * GNSS part of the consys: no registers of its own, the GNSS DSP stream travels over the
+	 * BTIF/STP link of the consys node. The board adds the external LNA enable.
+	 */
+	gnss: gnss {
+		compatible = "mediatek,mt6785-gnss";
+		mediatek,consys = <&consys>;
+		status = "disabled";
+	};
+
 	cci: cci {
 		compatible = "mediatek,mt6785-cci", "mediatek,mt8186-cci";
 		clocks = <&mcusys CLK_MCU_ARMPLL_BUS>,
@@ -2113,6 +2133,57 @@
 			clocks = <&vencsys CLK_VENC_LARB>, <&vencsys CLK_VENC_LARB>;
 			clock-names = "apb", "smi";
 			power-domains = <&spm MT6785_POWER_DOMAIN_VENC>;
+		};
+
+		/*
+		 * CONNAC1 connectivity subsystem including its BTIF (AP side of the WMT/STP link).
+		 * BTIF uses the AP DMA channels (TX 0x11000b80, RX 0x11000c00) by default and falls
+		 * back to PIO. The CONN MTCMOS is switched through the CONN power domain at the
+		 * appropriate point of the power-on sequence; the SCPSYS syscon is only read for
+		 * status.
+		 */
+		consys: connectivity@18002000 {
+			compatible = "mediatek,mt6785-consys";
+			reg = <0 0x18002000 0 0x1000>,
+			      <0 0x18004000 0 0x1000>,
+			      <0 0x18007000 0 0x1000>,
+			      <0 0x180b1000 0 0x1000>,
+			      <0 0x180b3000 0 0x1000>,
+			      <0 0x180c1000 0 0x1000>,
+			      <0 0x1024c000 0 0x40>,
+			      <0 0x1100c000 0 0x1000>,
+			      <0 0x11000b80 0 0x80>,
+			      <0 0x11000c00 0 0x80>;
+			reg-names = "mcu-cfg", "hif-pdma", "hif-on", "top-misc-off",
+				    "afe", "top-misc-on", "pccif4", "btif", "btif-tx-dma", "btif-rx-dma";
+			interrupts = <GIC_SPI 138 IRQ_TYPE_LEVEL_LOW>,
+				     <GIC_SPI 155 IRQ_TYPE_LEVEL_LOW>,
+				     <GIC_SPI 154 IRQ_TYPE_LEVEL_LOW>;
+			interrupt-names = "btif", "btif-tx-dma", "btif-rx-dma";
+			clocks = <&infracfg CLK_INFRA_CCIF4_AP>,
+				 <&infracfg CLK_INFRA_BTIF>,
+				 <&infracfg CLK_INFRA_AP_DMA>;
+			clock-names = "ccif", "btif", "apdma";
+			resets = <&watchdog MT6785_TOPRGU_CONN_MCU_RST>;
+			reset-names = "mcu";
+			power-domains = <&spm MT6785_POWER_DOMAIN_CONN>;
+			mediatek,scpsys = <&scpsys>;
+			mediatek,infracfg = <&infracfg>;
+			mediatek,pericfg = <&pericfg>;
+			status = "disabled";
+		};
+
+		/*
+		 * WLAN part of the consys, reached over the CONN bus window (WFDMA at +0x4000,
+		 * host CSR at +0x7000). The window overlaps the consys registers; the WLAN driver
+		 * maps it without claiming it.
+		 */
+		wifi: wifi@18000000 {
+			compatible = "mediatek,mt6785-wifi";
+			reg = <0 0x18000000 0 0x100000>;
+			interrupts = <GIC_SPI 322 IRQ_TYPE_LEVEL_LOW>;
+			mediatek,consys = <&consys>;
+			status = "disabled";
 		};
 
 		apu_conn: clock-controller@19000000 {
