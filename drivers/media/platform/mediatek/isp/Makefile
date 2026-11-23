@@ -20,3 +20,10 @@ mtk-dip-mt6785-$(CONFIG_MTK_DIP_MT6785_KUNIT_TEST) += mtk_dip_lsc_test.o
 mtk-dip-mt6785-$(CONFIG_MTK_DIP_MT6785_KUNIT_TEST) += mtk_dip_bq_test.o
 mtk-dip-mt6785-$(CONFIG_MTK_DIP_MT6785_KUNIT_TEST) += mtk_dip_bayer_test.o
 obj-$(CONFIG_MTK_DIP_MT6785) += mtk-dip-mt6785.o
+
+mtk-mfb-mt6785-y += mtk_mfb_hw.o
+mtk-mfb-mt6785-y += mtk_mfb_job.o
+mtk-mfb-mt6785-y += mtk_mfb_params.o
+mtk-mfb-mt6785-y += mtk_mfb_v4l2.o
+mtk-mfb-mt6785-$(CONFIG_MTK_MFB_MT6785_KUNIT_TEST) += mtk_mfb_job_test.o
+obj-$(CONFIG_MTK_MFB_MT6785) += mtk-mfb-mt6785.o
