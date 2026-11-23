@@ -1614,6 +1614,50 @@
 				reg = <0x93c 0x18>;
 			};
 
+			csi0_efuse: csi0-calib@18c {
+				reg = <0x18c 0x4>;
+			};
+
+			csi1_efuse_a: csi1a-calib@190 {
+				reg = <0x190 0x4>;
+			};
+
+			csi1_efuse_b: csi1b-calib@1bc {
+				reg = <0x1bc 0x4>;
+			};
+		};
+
+		/* one efuse word for both halves: A in bits 31:17, B in 16:2 */
+		csi0_rx: phy@11c80000 {
+			compatible = "mediatek,mt6785-csi-rx";
+			reg = <0 0x11c80000 0 0x4000>;
+			num-lanes = <4>;
+			phy-type = <PHY_TYPE_DPHY>;
+			#phy-cells = <0>;
+			nvmem-cells = <&csi0_efuse>, <&csi0_efuse>;
+			nvmem-cell-names = "csi-a", "csi-b";
+			mediatek,efuse-hsrt-shift = <17 2>;
+			status = "disabled";
+		};
+
+		csi1_rx: phy@11c84000 {
+			compatible = "mediatek,mt6785-csi-rx";
+			reg = <0 0x11c84000 0 0x4000>;
+			num-lanes = <4>;
+			phy-type = <PHY_TYPE_DPHY>;
+			#phy-cells = <0>;
+			nvmem-cells = <&csi1_efuse_a>, <&csi1_efuse_b>;
+			nvmem-cell-names = "csi-a", "csi-b";
+			status = "disabled";
+		};
+
+		csi2_rx: phy@11c88000 {
+			compatible = "mediatek,mt6785-csi-rx";
+			reg = <0 0x11c88000 0 0x4000>;
+			num-lanes = <4>;
+			phy-type = <PHY_TYPE_DPHY>;
+			#phy-cells = <0>;
+			status = "disabled";
 		};
 
 		u3phy: t-phy@11e40000 {
@@ -2103,6 +2147,36 @@
 			power-domains = <&spm MT6785_POWER_DOMAIN_ISP>;
 		};
 
+		dip: dip@15022000 {
+			compatible = "mediatek,mt6785-dip";
+			reg = <0 0x15022000 0 0x6000>;
+			interrupts = <GIC_SPI 292 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&imgsys CLK_IMG_DIP>;
+			clock-names = "dip";
+			iommus = <&iommu M4U_PORT_IMG_IMGI>,
+				 <&iommu M4U_PORT_IMG_IMG2O>,
+				 <&iommu M4U_PORT_IMG_IMG3O>,
+				 <&iommu M4U_PORT_IMG_VIPI>,
+				 <&iommu M4U_PORT_IMG_LCEI>,
+				 <&iommu M4U_PORT_IMG_SMXI>,
+				 <&iommu M4U_PORT_IMG_SMXO>;
+			power-domains = <&spm MT6785_POWER_DOMAIN_ISP>;
+			status = "disabled";
+		};
+
+		mfb: mfb@1502e000 {
+			compatible = "mediatek,mt6785-mfb";
+			reg = <0 0x1502e000 0 0x1000>;
+			interrupts = <GIC_SPI 300 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&imgsys CLK_IMG_MFB>;
+			clock-names = "mfb";
+			iommus = <&iommu M4U_PORT_IMG_MFB_RDMA0>,
+				 <&iommu M4U_PORT_IMG_MFB_RDMA1>,
+				 <&iommu M4U_PORT_IMG_MFB_WDMA>;
+			power-domains = <&spm MT6785_POWER_DOMAIN_ISP>;
+			status = "disabled";
+		};
+
 		vdecsys: clock-controller@16000000 {
 			compatible = "mediatek,mt6785-vdecsys", "syscon";
 			reg = <0 0x16000000 0 0x1000>;
@@ -2225,6 +2299,74 @@
 				 <&mmsys CLK_MM_GALS_CAM2MM>;
 			clock-names = "apb", "smi", "gals";
 			power-domains = <&spm MT6785_POWER_DOMAIN_CAM>;
+		};
+
+		seninf: seninf@1a040000 {
+			compatible = "mediatek,mt6785-seninf";
+			reg = <0 0x1a040000 0 0x8000>;
+			clocks = <&camsys CLK_CAM_SENINF>,
+				 <&topckgen CLK_TOP_SENINF0>,
+				 <&topckgen CLK_TOP_SENINF1>,
+				 <&topckgen CLK_TOP_SENINF2>;
+			clock-names = "camsys", "top_mux", "top_mux1", "top_mux2";
+			power-domains = <&spm MT6785_POWER_DOMAIN_CAM>;
+			status = "disabled";
+		};
+
+		camsv1: camsv@1a050000 {
+			compatible = "mediatek,mt6785-camsv";
+			reg = <0 0x1a050510 0 0x40>,
+			      <0 0x1a050020 0 0x28>,
+			      <0 0x1a050220 0 0x90>;
+			interrupts = <GIC_SPI 279 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&camsys CLK_CAM_MAIN>, <&camsys CLK_CAM_TG>,
+				 <&camsys CLK_CAM_SV0>, <&camsys CLK_CAM_SV1>;
+			clock-names = "cam", "camtg", "camsv", "camsv1";
+			iommus = <&iommu M4U_PORT_CAM_SOCO>;
+			power-domains = <&spm MT6785_POWER_DOMAIN_CAM>;
+			status = "disabled";
+		};
+
+		camsv2: camsv@1a051000 {
+			compatible = "mediatek,mt6785-camsv";
+			reg = <0 0x1a051510 0 0x40>,
+			      <0 0x1a051020 0 0x28>,
+			      <0 0x1a051220 0 0x90>;
+			interrupts = <GIC_SPI 280 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&camsys CLK_CAM_MAIN>, <&camsys CLK_CAM_TG>,
+				 <&camsys CLK_CAM_SV0>, <&camsys CLK_CAM_SV1>;
+			clock-names = "cam", "camtg", "camsv", "camsv1";
+			iommus = <&iommu M4U_PORT_CAM_SOCO>;
+			power-domains = <&spm MT6785_POWER_DOMAIN_CAM>;
+			status = "disabled";
+		};
+
+		camsv3: camsv@1a052000 {
+			compatible = "mediatek,mt6785-camsv";
+			reg = <0 0x1a052510 0 0x40>,
+			      <0 0x1a052020 0 0x28>,
+			      <0 0x1a052220 0 0x90>;
+			interrupts = <GIC_SPI 281 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&camsys CLK_CAM_MAIN>, <&camsys CLK_CAM_TG>,
+				 <&camsys CLK_CAM_SV0>, <&camsys CLK_CAM_SV1>;
+			clock-names = "cam", "camtg", "camsv", "camsv1";
+			iommus = <&iommu M4U_PORT_CAM_SOC1>;
+			power-domains = <&spm MT6785_POWER_DOMAIN_CAM>;
+			status = "disabled";
+		};
+
+		camsv4: camsv@1a053000 {
+			compatible = "mediatek,mt6785-camsv";
+			reg = <0 0x1a053510 0 0x40>,
+			      <0 0x1a053020 0 0x28>,
+			      <0 0x1a053220 0 0x90>;
+			interrupts = <GIC_SPI 282 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&camsys CLK_CAM_MAIN>, <&camsys CLK_CAM_TG>,
+				 <&camsys CLK_CAM_SV0>, <&camsys CLK_CAM_SV1>;
+			clock-names = "cam", "camtg", "camsv", "camsv1";
+			iommus = <&iommu M4U_PORT_CAM_SOC1>;
+			power-domains = <&spm MT6785_POWER_DOMAIN_CAM>;
+			status = "disabled";
 		};
 	};
 };
