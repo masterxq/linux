@@ -18,7 +18,9 @@ description:
 
 properties:
   compatible:
-    const: mediatek,mt8365-camsv
+    enum:
+      - mediatek,mt6785-camsv
+      - mediatek,mt8365-camsv
 
   reg:
     items:
@@ -33,16 +35,20 @@ properties:
     maxItems: 1
 
   clocks:
+    minItems: 3
     items:
       - description: cam clock
       - description: camtg clock
       - description: camsv clock
+      - description: second camsv clock (MT6785 camsys CAMSV1 gate)
 
   clock-names:
+    minItems: 3
     items:
       - const: cam
       - const: camtg
       - const: camsv
+      - const: camsv1
 
   iommus:
     maxItems: 1
@@ -58,13 +64,25 @@ properties:
     required:
       - port@0
 
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: mediatek,mt8365-camsv
+    then:
+      properties:
+        clocks:
+          maxItems: 3
+        clock-names:
+          maxItems: 3
+
 required:
   - compatible
   - interrupts
   - clocks
   - clock-names
-  - power-domains
   - iommus
+  - power-domains
   - ports
 
 additionalProperties: false
