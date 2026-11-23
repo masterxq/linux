@@ -147,6 +147,8 @@ extern const u8 v4l2_vp9_kf_y_mode_prob[10][10][9]; /* Section 10.4 of the spec 
 extern const u8 v4l2_vp9_kf_partition_probs[16][3]; /* Section 10.4 of the spec */
 extern const u8 v4l2_vp9_kf_uv_mode_prob[10][9]; /* Section 10.4 of the spec */
 extern const struct v4l2_vp9_frame_context v4l2_vp9_default_probs; /* Section 10.5 of the spec */
+extern const u16 v4l2_vp9_dc_qlookup[3][256]; /* Section 8.6.1 of the spec */
+extern const u16 v4l2_vp9_ac_qlookup[3][256]; /* Section 8.6.1 of the spec */
 
 /**
  * v4l2_vp9_fw_update_probs() - Perform forward update of vp9 probabilities
