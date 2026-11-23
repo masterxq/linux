@@ -83,27 +83,31 @@ EXPORT_SYMBOL_GPL(mtk_jpeg_enc_start);
 void mtk_jpeg_set_enc_src(struct mtk_jpeg_ctx *ctx,  void __iomem *base,
 			  struct vb2_buffer *src_buf)
 {
-	int i;
-	dma_addr_t dma_addr;
-	u32 addr_ext;
+	const struct mtk_jpeg_q_data *q = &ctx->out_q;
 	bool support_34bit = ctx->jpeg->variant->support_34bit;
+	dma_addr_t luma, chroma;
 
-	for (i = 0; i < src_buf->num_planes; i++) {
-		dma_addr = vb2_dma_contig_plane_dma_addr(src_buf, i) +
-			   src_buf->planes[i].data_offset;
-		if (i == 0)
-			writel(lower_32_bits(dma_addr), base + JPEG_ENC_SRC_LUMA_ADDR);
-		else
-			writel(lower_32_bits(dma_addr), base + JPEG_ENC_SRC_CHROMA_ADDR);
+	luma = vb2_dma_contig_plane_dma_addr(src_buf, 0) +
+	       src_buf->planes[0].data_offset;
+	writel(lower_32_bits(luma), base + JPEG_ENC_SRC_LUMA_ADDR);
+	if (support_34bit)
+		writel(FIELD_PREP(MTK_JPEG_ADDR_MASK, upper_32_bits(luma)),
+		       base + JPEG_ENC_SRC_LUMA_ADDR_EXT);
 
-		if (support_34bit) {
-			addr_ext = FIELD_PREP(MTK_JPEG_ADDR_MASK, upper_32_bits(dma_addr));
-			if (i == 0)
-				writel(addr_ext, base + JPEG_ENC_SRC_LUMA_ADDR_EXT);
-			else
-				writel(addr_ext, base + JPEG_ENC_SRC_CHRO_ADDR_EXT);
-		}
-	}
+	if (!mtk_jpeg_enc_fmt_is_yuv420(q->fmt))
+		return;
+
+	if (src_buf->num_planes > 1)
+		chroma = vb2_dma_contig_plane_dma_addr(src_buf, 1) +
+			 src_buf->planes[1].data_offset;
+	else
+		/* one plane: the chroma rows follow the luma rows */
+		chroma = luma + (dma_addr_t)q->pix_mp.plane_fmt[0].bytesperline *
+				q->pix_mp.height;
+	writel(lower_32_bits(chroma), base + JPEG_ENC_SRC_CHROMA_ADDR);
+	if (support_34bit)
+		writel(FIELD_PREP(MTK_JPEG_ADDR_MASK, upper_32_bits(chroma)),
+		       base + JPEG_ENC_SRC_CHRO_ADDR_EXT);
 }
 EXPORT_SYMBOL_GPL(mtk_jpeg_set_enc_src);
 
@@ -140,7 +144,6 @@ void mtk_jpeg_set_enc_params(struct mtk_jpeg_ctx *ctx,  void __iomem *base)
 	u32 value;
 	u32 width = ctx->out_q.enc_crop_rect.width;
 	u32 height = ctx->out_q.enc_crop_rect.height;
-	u32 enc_format = ctx->out_q.fmt->fourcc;
 	u32 bytesperline = ctx->out_q.pix_mp.plane_fmt[0].bytesperline;
 	u32 blk_num;
 	u32 img_stride;
@@ -151,8 +154,7 @@ void mtk_jpeg_set_enc_params(struct mtk_jpeg_ctx *ctx,  void __iomem *base)
 	value = width << 16 | height;
 	writel(value, base + JPEG_ENC_IMG_SIZE);
 
-	if (enc_format == V4L2_PIX_FMT_NV12M ||
-	    enc_format == V4L2_PIX_FMT_NV21M)
+	if (mtk_jpeg_enc_fmt_is_yuv420(ctx->out_q.fmt))
 	    /*
 	     * Total 8 x 8 block number of luma and chroma.
 	     * The number of blocks is counted from 0.
@@ -164,8 +166,7 @@ void mtk_jpeg_set_enc_params(struct mtk_jpeg_ctx *ctx,  void __iomem *base)
 			  DIV_ROUND_UP(height, 8) * 4 - 1;
 	writel(blk_num, base + JPEG_ENC_BLK_NUM);
 
-	if (enc_format == V4L2_PIX_FMT_NV12M ||
-	    enc_format == V4L2_PIX_FMT_NV21M) {
+	if (mtk_jpeg_enc_fmt_is_yuv420(ctx->out_q.fmt)) {
 		/* 4:2:0 */
 		img_stride = round_up(width, 16);
 		mem_stride = bytesperline;
