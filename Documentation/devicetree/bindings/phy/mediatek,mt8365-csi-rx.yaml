@@ -20,10 +20,14 @@ description:
 properties:
   compatible:
     enum:
+      - mediatek,mt6785-csi-rx
       - mediatek,mt8365-csi-rx
 
   reg:
     maxItems: 1
+    description:
+      Register window of one CSI port; on MT6785 the 0x4000 window with the
+      analog halves A and B and the D-PHY top block.
 
   num-lanes:
     enum: [2, 3, 4]
@@ -38,6 +42,29 @@ properties:
         - PHY_TYPE_DPHY
         - PHY_TYPE_CPHY
       See include/dt-bindings/phy/phy.h for constants.
+
+  nvmem-cells:
+    maxItems: 2
+    description:
+      MT6785 only, optional. Efuse words with the HS termination trimming of
+      the A and B half of the port.
+
+  nvmem-cell-names:
+    items:
+      - const: csi-a
+      - const: csi-b
+
+  mediatek,efuse-hsrt-shift:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    items:
+      - description: lowest code bit in the efuse word of the A half
+        maximum: 17
+      - description: lowest code bit in the efuse word of the B half
+        maximum: 17
+    description:
+      MT6785 only, optional. Position of the three 5-bit HS termination
+      codes in the efuse words, given as the bit of the lowest code (17 for
+      codes in bits 31:17, the default, 2 for codes in bits 16:2).
 
   phy-type:
     description:
