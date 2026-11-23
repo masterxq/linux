@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/mediatek,mt6785-dip.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 ISP pass 2 (DIP)
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description:
+  The DIP (digital image processing) block is the second pass of the MT6785
+  image signal processor. It reads raw frames from memory, processes them and
+  writes the result back to memory through the IOMMU, on ports 0-6 of SMI
+  larb5.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-dip
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: DIP clock
+
+  clock-names:
+    items:
+      - const: dip
+
+  iommus:
+    maxItems: 7
+    description:
+      The larb5 ports of the DIP (IMGI, IMG2O, IMG3O, VIPI, LCEI, SMXI, SMXO),
+      see include/dt-bindings/memory/mediatek,mt6785-memory-port.h.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - power-domains
+  - clocks
+  - clock-names
+  - iommus
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/memory/mediatek,mt6785-memory-port.h>
+    #include <dt-bindings/power/mediatek,mt6785-power.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        dip@15022000 {
+            compatible = "mediatek,mt6785-dip";
+            reg = <0 0x15022000 0 0x6000>;
+            interrupts = <GIC_SPI 292 IRQ_TYPE_LEVEL_LOW>;
+            clocks = <&imgsys CLK_IMG_DIP>;
+            clock-names = "dip";
+            power-domains = <&spm MT6785_POWER_DOMAIN_ISP>;
+            iommus = <&iommu M4U_PORT_IMG_IMGI>,
+                     <&iommu M4U_PORT_IMG_IMG2O>,
+                     <&iommu M4U_PORT_IMG_IMG3O>,
+                     <&iommu M4U_PORT_IMG_VIPI>,
+                     <&iommu M4U_PORT_IMG_LCEI>,
+                     <&iommu M4U_PORT_IMG_SMXI>,
+                     <&iommu M4U_PORT_IMG_SMXO>;
+        };
+    };
+...
