@@ -37,7 +37,10 @@ int vdec_if_init(struct mtk_vcodec_dec_ctx *ctx, unsigned int fourcc)
 		ctx->hw_id = MTK_VDEC_CORE;
 		break;
 	case V4L2_PIX_FMT_VP8_FRAME:
-		ctx->dec_if = &vdec_vp8_slice_if;
+		if (ctx->dev->vdec_pdata->direct)
+			ctx->dec_if = &vdec_vp8_slice_direct_if;
+		else
+			ctx->dec_if = &vdec_vp8_slice_if;
 		ctx->hw_id = MTK_VDEC_CORE;
 		break;
 	case V4L2_PIX_FMT_VP8:
@@ -49,8 +52,13 @@ int vdec_if_init(struct mtk_vcodec_dec_ctx *ctx, unsigned int fourcc)
 		ctx->hw_id = MTK_VDEC_CORE;
 		break;
 	case V4L2_PIX_FMT_VP9_FRAME:
-		ctx->dec_if = &vdec_vp9_slice_lat_if;
-		ctx->hw_id = IS_VDEC_LAT_ARCH(hw_arch) ? MTK_VDEC_LAT0 : MTK_VDEC_CORE;
+		if (ctx->dev->vdec_pdata->direct) {
+			ctx->dec_if = &vdec_vp9_slice_direct_if;
+			ctx->hw_id = MTK_VDEC_CORE;
+		} else {
+			ctx->dec_if = &vdec_vp9_slice_lat_if;
+			ctx->hw_id = IS_VDEC_LAT_ARCH(hw_arch) ? MTK_VDEC_LAT0 : MTK_VDEC_CORE;
+		}
 		break;
 	case V4L2_PIX_FMT_HEVC_SLICE:
 		if (ctx->dev->vdec_pdata->direct) {
@@ -64,6 +72,20 @@ int vdec_if_init(struct mtk_vcodec_dec_ctx *ctx, unsigned int fourcc)
 	case V4L2_PIX_FMT_AV1_FRAME:
 		ctx->dec_if = &vdec_av1_slice_lat_if;
 		ctx->hw_id = MTK_VDEC_LAT0;
+		break;
+	case V4L2_PIX_FMT_MPEG2_SLICE:
+		if (!ctx->dev->vdec_pdata->direct)
+			return -EINVAL;
+		ctx->dec_if = &vdec_mpeg2_slice_direct_if;
+		ctx->hw_id = MTK_VDEC_CORE;
+		break;
+	case V4L2_PIX_FMT_MPEG4:
+	case V4L2_PIX_FMT_XVID:
+	case V4L2_PIX_FMT_H263:
+		if (!ctx->dev->vdec_pdata->direct)
+			return -EINVAL;
+		ctx->dec_if = &vdec_mpeg4_direct_if;
+		ctx->hw_id = MTK_VDEC_CORE;
 		break;
 	default:
 		return -EINVAL;
