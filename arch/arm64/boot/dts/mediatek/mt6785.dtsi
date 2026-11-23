@@ -1032,6 +1032,14 @@
 			#reset-cells = <1>;
 		};
 
+		apxgpt: timer@10008000 {
+			compatible = "mediatek,mt6785-gpt";
+			reg = <0 0x10008000 0 0x1000>;
+			interrupts = <GIC_SPI 203 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&clk32k>, <&infracfg CLK_INFRA_APXGPT>;
+			clock-names = "rtc", "bus";
+		};
+
 		apmixedsys: clock-controller@1000c000 {
 			compatible = "mediatek,mt6785-apmixedsys", "syscon";
 			reg = <0 0x1000c000 0 0x1000>;
@@ -1048,6 +1056,16 @@
 			clock-names = "spi", "wrap";
 			resets = <&infracfg MT6785_INFRA_PMIC_WRAP_RST>;
 			reset-names = "pwrap";
+		};
+
+		keypad: keyboard@10010000 {
+			compatible = "mediatek,mt6785-keypad",
+				     "mediatek,mt6779-keypad";
+			reg = <0 0x10010000 0 0x1000>;
+			interrupts = <GIC_SPI 75 IRQ_TYPE_EDGE_FALLING>;
+			clocks = <&clk26m>;
+			clock-names = "kpd";
+			status = "disabled";
 		};
 
 		systimer: timer@10017000 {
@@ -1079,6 +1097,15 @@
 			clock-names = "gce";
 			interrupts = <GIC_SPI 185 IRQ_TYPE_LEVEL_LOW>;
 			#mbox-cells = <2>;
+		};
+
+		auxadc: adc@11001000 {
+			compatible = "mediatek,mt6785-auxadc",
+				     "mediatek,mt6765-auxadc";
+			reg = <0 0x11001000 0 0x1000>;
+			clocks = <&infracfg CLK_INFRA_AUXADC>;
+			clock-names = "main";
+			#io-channel-cells = <1>;
 		};
 
 		uart0: serial@11002000 {
@@ -1175,6 +1202,25 @@
 			clocks = <&topckgen CLK_TOP_MAINPLL_D5_D2>,
 				 <&topckgen CLK_TOP_SPI>, <&infracfg CLK_INFRA_SPI0>;
 			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			status = "disabled";
+		};
+
+		/*
+		 * LVTS thermal controller: four controllers at 0x000 (big), 0x100 (LITTLE), 0x200
+		 * (GPU) and 0x300 (VPU). AUXADC thermal and EEM share the 4 KiB block above 0x400
+		 * and are not mapped here.
+		 */
+		lvts: thermal-sensor@1100b000 {
+			compatible = "mediatek,mt6785-lvts";
+			reg = <0 0x1100b000 0 0x400>;
+			interrupts = <GIC_SPI 100 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&infracfg CLK_INFRA_THERM>;
+			resets = <&infracfg MT6785_INFRA_THERM_CTRL_RST>;
+			nvmem-cells = <&lvts_efuse_data1>, <&lvts_efuse_data2>,
+				      <&lvts_efuse_data3>;
+			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2",
+					   "lvts-calib-data-3";
+			#thermal-sensor-cells = <1>;
 			status = "disabled";
 		};
 
@@ -1428,6 +1474,31 @@
 			reset-names = "hci_rst", "unipro_rst", "crypto_rst";
 
 			status = "disabled";
+		};
+
+		/*
+		 * LVTS calibration words: golden temperature at 0x1b0, count_r big0/big1 at
+		 * 0x1c8/0x1cc, LITTLE0-2, GPU0/1 and VPU at 0x93c..0x950.
+		 */
+		efuse: efuse@11c10000 {
+			compatible = "mediatek,mt6785-efuse", "mediatek,efuse";
+			reg = <0 0x11c10000 0 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			status = "disabled";
+
+			lvts_efuse_data1: lvts1-calib@1b0 {
+				reg = <0x1b0 0x4>;
+			};
+
+			lvts_efuse_data2: lvts2-calib@1c8 {
+				reg = <0x1c8 0x8>;
+			};
+
+			lvts_efuse_data3: lvts3-calib@93c {
+				reg = <0x93c 0x18>;
+			};
+
 		};
 
 		u3phy: t-phy@11e40000 {
