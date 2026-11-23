@@ -54,6 +54,30 @@ static struct mtk_jpeg_fmt mtk_jpeg_enc_formats[] = {
 		.v_align	= 4,
 		.flags		= MTK_JPEG_FMT_FLAG_OUTPUT,
 	},
+	/*
+	 * NV12 and NV21 in one plane, the chroma rows behind the luma rows:
+	 * 4 luma and 2 chroma rows for each 4 rows of the image.
+	 */
+	{
+		.fourcc		= V4L2_PIX_FMT_NV12,
+		.hw_format	= JPEG_ENC_YUV_FORMAT_NV12,
+		.h_sample	= {4},
+		.v_sample	= {6},
+		.colplanes	= 1,
+		.h_align	= 4,
+		.v_align	= 4,
+		.flags		= MTK_JPEG_FMT_FLAG_OUTPUT,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_NV21,
+		.hw_format	= JEPG_ENC_YUV_FORMAT_NV21,
+		.h_sample	= {4},
+		.v_sample	= {6},
+		.colplanes	= 1,
+		.h_align	= 4,
+		.v_align	= 4,
+		.flags		= MTK_JPEG_FMT_FLAG_OUTPUT,
+	},
 	{
 		.fourcc		= V4L2_PIX_FMT_YUYV,
 		.hw_format	= JPEG_ENC_YUV_FORMAT_YUYV,
@@ -173,7 +197,8 @@ static int mtk_jpeg_enc_ctrls_setup(struct mtk_jpeg_ctx *ctx)
 
 	v4l2_ctrl_new_std(handler, ops, V4L2_CID_JPEG_RESTART_INTERVAL, 0, 100,
 			  1, 0);
-	v4l2_ctrl_new_std(handler, ops, V4L2_CID_JPEG_COMPRESSION_QUALITY, 48,
+	v4l2_ctrl_new_std(handler, ops, V4L2_CID_JPEG_COMPRESSION_QUALITY,
+			  ctx->jpeg->variant->min_quality ?: MTK_JPEG_MIN_QUALITY,
 			  100, 1, 90);
 	v4l2_ctrl_new_std(handler, ops, V4L2_CID_JPEG_ACTIVE_MARKER, 0,
 			  V4L2_JPEG_ACTIVE_MARKER_APP1, 0, 0);
@@ -1160,7 +1185,8 @@ static int mtk_jpeg_open(struct file *file)
 		goto free;
 	}
 
-	INIT_WORK(&ctx->jpeg_work, jpeg->variant->jpeg_worker);
+	if (jpeg->variant->jpeg_worker)
+		INIT_WORK(&ctx->jpeg_work, jpeg->variant->jpeg_worker);
 	INIT_LIST_HEAD(&ctx->dst_done_queue);
 	spin_lock_init(&ctx->done_queue_lock);
 	v4l2_fh_init(&ctx->fh, vfd);
@@ -1202,7 +1228,8 @@ static int mtk_jpeg_release(struct file *file)
 	struct mtk_jpeg_dev *jpeg = video_drvdata(file);
 	struct mtk_jpeg_ctx *ctx = mtk_jpeg_file_to_ctx(file);
 
-	cancel_work_sync(&ctx->jpeg_work);
+	if (jpeg->variant->jpeg_worker)
+		cancel_work_sync(&ctx->jpeg_work);
 	mutex_lock(&jpeg->lock);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
@@ -1261,16 +1288,18 @@ static int mtk_jpeg_single_core_init(struct platform_device *pdev,
 	if (jpeg_irq < 0)
 		return jpeg_irq;
 
+	/* the handler reads the registers: enabled only while powered */
 	ret = devm_request_irq(&pdev->dev,
 			       jpeg_irq,
 			       jpeg->variant->irq_handler,
-			       0,
+			       IRQF_NO_AUTOEN,
 			       pdev->name, jpeg);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to request jpeg_irq %d (%d)\n",
 			jpeg_irq, ret);
 		return ret;
 	}
+	jpeg->irq = jpeg_irq;
 
 	ret = devm_clk_bulk_get(jpeg->dev,
 				jpeg->variant->num_clks,
@@ -1412,6 +1441,9 @@ static __maybe_unused int mtk_jpeg_pm_suspend(struct device *dev)
 {
 	struct mtk_jpeg_dev *jpeg = dev_get_drvdata(dev);
 
+	/* waits for a running handler: no register access after this */
+	if (jpeg->irq)
+		disable_irq(jpeg->irq);
 	mtk_jpeg_clk_off(jpeg);
 
 	return 0;
@@ -1422,6 +1454,8 @@ static __maybe_unused int mtk_jpeg_pm_resume(struct device *dev)
 	struct mtk_jpeg_dev *jpeg = dev_get_drvdata(dev);
 
 	mtk_jpeg_clk_on(jpeg);
+	if (jpeg->irq)
+		enable_irq(jpeg->irq);
 
 	return 0;
 }
@@ -1791,24 +1825,57 @@ getbuf_fail:
 	v4l2_m2m_job_finish(jpeg->m2m_dev, ctx->fh.m2m_ctx);
 }
 
+/*
+ * The encoder stopped without a result, e.g. on a stall when the output
+ * buffer is too small for the bitstream: reset it and end the job with an
+ * error, as the timeout work does.
+ */
+static irqreturn_t mtk_jpeg_enc_error(struct mtk_jpeg_dev *jpeg, u32 irq_status)
+{
+	struct vb2_v4l2_buffer *src_buf, *dst_buf;
+	struct mtk_jpeg_ctx *ctx;
+
+	ctx = v4l2_m2m_get_curr_priv(jpeg->m2m_dev);
+	if (!ctx) {
+		v4l2_err(&jpeg->v4l2_dev, "Context is NULL\n");
+		return IRQ_HANDLED;
+	}
+
+	dev_warn_ratelimited(jpeg->dev,
+			     "encoding failed, interrupt status %#x\n",
+			     irq_status);
+
+	src_buf = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
+	dst_buf = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
+
+	jpeg->variant->hw_reset(jpeg->reg_base);
+
+	v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+	v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+	v4l2_m2m_job_finish(jpeg->m2m_dev, ctx->fh.m2m_ctx);
+	pm_runtime_put(jpeg->dev);
+	return IRQ_HANDLED;
+}
+
 static irqreturn_t mtk_jpeg_enc_irq(int irq, void *priv)
 {
 	struct mtk_jpeg_dev *jpeg = priv;
 	u32 irq_status;
-	irqreturn_t ret = IRQ_NONE;
-
-	cancel_delayed_work(&jpeg->job_timeout_work);
 
 	irq_status = readl(jpeg->reg_base + JPEG_ENC_INT_STS) &
 		     JPEG_ENC_INT_STATUS_MASK_ALLIRQ;
-	if (irq_status)
-		writel(0, jpeg->reg_base + JPEG_ENC_INT_STS);
+	if (!irq_status)
+		return IRQ_NONE;
+	writel(0, jpeg->reg_base + JPEG_ENC_INT_STS);
+
+	/* once the timeout work runs, it ends the job */
+	if (!cancel_delayed_work(&jpeg->job_timeout_work))
+		return IRQ_HANDLED;
 
 	if (!(irq_status & JPEG_ENC_INT_STATUS_DONE))
-		return ret;
+		return mtk_jpeg_enc_error(jpeg, irq_status);
 
-	ret = mtk_jpeg_enc_done(jpeg);
-	return ret;
+	return mtk_jpeg_enc_done(jpeg);
 }
 
 static irqreturn_t mtk_jpeg_dec_irq(int irq, void *priv)
@@ -1898,6 +1965,27 @@ static const struct mtk_jpeg_variant mtk_jpeg_drvdata = {
 	.multi_core = false,
 };
 
+/*
+ * MT6785: the hardware tables for the qualities 34 and 48 are not used: the
+ * vendor driver refuses them on this encoder.
+ */
+static const struct mtk_jpeg_variant mt6785_jpeg_drvdata = {
+	.clks = mtk_jpeg_clocks,
+	.num_clks = ARRAY_SIZE(mtk_jpeg_clocks),
+	.formats = mtk_jpeg_enc_formats,
+	.num_formats = MTK_JPEG_ENC_NUM_FORMATS,
+	.qops = &mtk_jpeg_enc_qops,
+	.irq_handler = mtk_jpeg_enc_irq,
+	.hw_reset = mtk_jpeg_enc_reset,
+	.m2m_ops = &mtk_jpeg_enc_m2m_ops,
+	.dev_name = "mtk-jpeg-enc",
+	.ioctl_ops = &mtk_jpeg_enc_ioctl_ops,
+	.out_q_default_fourcc = V4L2_PIX_FMT_YUYV,
+	.cap_q_default_fourcc = V4L2_PIX_FMT_JPEG,
+	.multi_core = false,
+	.min_quality = 60,
+};
+
 static struct mtk_jpeg_variant mtk8195_jpegenc_drvdata = {
 	.formats = mtk_jpeg_enc_formats,
 	.num_formats = MTK_JPEG_ENC_NUM_FORMATS,
@@ -1932,6 +2020,10 @@ static const struct of_device_id mtk_jpeg_match[] = {
 	{
 		.compatible = "mediatek,mt2701-jpgdec",
 		.data = &mt8173_jpeg_drvdata,
+	},
+	{
+		.compatible = "mediatek,mt6785-jpgenc",
+		.data = &mt6785_jpeg_drvdata,
 	},
 	{
 		.compatible = "mediatek,mtk-jpgenc",

@@ -84,6 +84,13 @@ struct mtk_jpeg_enc_qlt {
 	u8	hardware_value;
 };
 
+/* NV12 and NV21, in one or two planes: separate luma and chroma rows */
+static inline bool mtk_jpeg_enc_fmt_is_yuv420(const struct mtk_jpeg_fmt *fmt)
+{
+	return fmt->hw_format == JPEG_ENC_YUV_FORMAT_NV12 ||
+	       fmt->hw_format == JEPG_ENC_YUV_FORMAT_NV21;
+}
+
 void mtk_jpeg_enc_reset(void __iomem *base);
 u32 mtk_jpeg_enc_get_file_size(void __iomem *base, bool support_34bit);
 void mtk_jpeg_enc_start(void __iomem *enc_reg_base);
