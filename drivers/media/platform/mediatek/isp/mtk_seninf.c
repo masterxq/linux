@@ -15,6 +15,7 @@
 #include <linux/videodev2.h>
 #include <media/media-device.h>
 #include <media/media-entity.h>
+#include <media/mipi-csi2.h>
 #include <media/v4l2-async.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
@@ -24,7 +25,9 @@
 #include <media/v4l2-mc.h>
 #include <media/v4l2-subdev.h>
 
+#include "mtk_seninf.h"
 #include "mtk_seninf_reg.h"
+#include "mtk_seninf_mt6785_reg.h"
 
 #define SENINF_TIMESTAMP_STEP		0x67
 #define SENINF_SETTLE_DELAY		0x15
@@ -92,16 +95,21 @@ enum mtk_seninf_format_flag {
  * @nb_inputs: Number of SENINF inputs
  * @nb_muxes: Number of SENINF MUX (FIFO) instances
  * @nb_outputs: Number of outputs (to CAM and CAMSV instances)
+ * @default_routes: Source pad of each sink pad in the default routing, 0
+ *	for no route, the same whatever is connected; without the table the
+ *	sink pads are routed 1:1 in order, the connected ones first
  */
 struct mtk_seninf_conf {
 	const char *model;
 	u8 nb_inputs;
 	u8 nb_muxes;
 	u8 nb_outputs;
+	const u8 *default_routes;
 	bool two_pixel_mode;	/* MUX PIX_SEL 2-pixel (MT8365) vs 1-pixel */
 	bool set_ck_sel_2;	/* force PHY_SENINF_CTL_CSI0.CK_SEL_2 = 2 */
 	bool cam_mux_8365;	/* CAM2 <- mux0, CAM3 <- mux1 hard-wired */
 	bool init_top_ctrl;	/* TOP_CTRL resets to MUX_LP_MODE, pixel clocks off */
+	bool csi_phy_2_0;	/* MT6785: newer register generation, see mtk_seninf_mt6785_reg.h */
 };
 
 /* MT8183 bring-up knobs */
@@ -111,13 +119,17 @@ MODULE_PARM_DESC(lane_mux_override, "raw MIPI_RX_CON24 LN0..3 mux byte (bits 31:
 static bool test_pattern;
 module_param(test_pattern, bool, 0644);
 MODULE_PARM_DESC(test_pattern, "feed the seninf test-pattern generator instead of the sensor (sensor still streams)");
-static int lens_focus = 330;
+static int lens_focus = 480;
 module_param(lens_focus, int, 0644);
-MODULE_PARM_DESC(lens_focus, "lens (VCM) position applied while a sensor with a lens streams, returned to 0 afterwards (-1 = leave the lens alone; krane ov8856+dw9768: 330 ~ 0.4 m..far)");
+MODULE_PARM_DESC(lens_focus, "lens (VCM) position applied while a sensor with a lens streams, returned to 0 afterwards (-1 = leave the lens alone; lisbon ov64b40+dw9800v: 480 ~ 2 m..far; krane ov8856+dw9768: 330 ~ 0.4 m..far)");
 /* MT8183: CAM2 feeds CAMSV1 and CAM3 feeds CAMSV2 (same as MT8365, found on HW). */
 static int cam_mux_out = 2;
 module_param(cam_mux_out, int, 0644);
 MODULE_PARM_DESC(cam_mux_out, "MT8183: CAMx output fed by output pad i is CAM(cam_mux_out + i) (default 2: CAM2->CAMSV1, CAM3->CAMSV2); -1 = route the mux to ALL 8 CAMx outputs (single camera only)");
+/* MT6785 debug parameters */
+static int mt6785_pix_mode = -1;
+module_param(mt6785_pix_mode, int, 0644);
+MODULE_PARM_DESC(mt6785_pix_mode, "MT6785: MUX and CAM mux pixel mode, -1 = from the sensor pixel rate (default), 0 = 1 pixel, 1 = 2 pixels, 2 = 4 pixels per clock (the CAMSV follows)");
 
 /**
  * struct mtk_seninf_format_info - Information about media bus formats
@@ -132,6 +144,24 @@ struct mtk_seninf_format_info {
 	u8 bpp;
 };
 
+/*
+ * Sources (sensors) of one input, one endpoint each: a board switch in front
+ * of the CSI-2 port connects one of them at a time.
+ */
+#define SENINF_MAX_NUM_SOURCES		2
+
+/**
+ * struct mtk_seninf_source - A source endpoint of a SENINF input
+ * @bus: CSI-2 bus configuration from DT
+ * @sd: Source subdev, NULL while it is not bound
+ * @pad: Source pad of @sd linked to the input
+ */
+struct mtk_seninf_source {
+	struct v4l2_mbus_config_mipi_csi2 bus;
+	struct v4l2_subdev *sd;
+	struct media_pad *pad;
+};
+
 /**
  * struct mtk_seninf_input - SENINF input block
  * @pad: DT port and media entity pad number
@@ -140,9 +170,22 @@ struct mtk_seninf_format_info {
  * @seninf: Back pointer to the mtk_seninf
  * @phy: PHY connected to the input
  * @phy_mode: PHY operation mode (NONE when the input is not connected)
- * @bus: CSI-2 bus configuration from DT
- * @source_sd: Source subdev connected to the input
- * @source_pad: Source pad connected to the input
+ * @sources: Source endpoints of the input, in the order of their endpoint IDs
+ * @num_sources: Number of entries in @sources
+ * @active: Source with the enabled media link, NULL for none. With one source
+ *	its link is immutable; with several the first one is linked by default
+ *	and user space moves the link (disable, then enable another).
+ * @bus: CSI-2 bus configuration of the active source
+ * @source_sd: Subdev of the active source, NULL while not bound
+ * @source_pad: Source pad of the active source
+ * @lens: Lens of the source, if any
+ * @lens_active: The lens is held at its streaming position
+ * @phy_on: MT6785: phy_power_on() succeeded for the running streams
+ * @users: Streams of the input running, protected by the lock of the active
+ *	state; the input and its source run while there is one
+ *
+ * @active, @bus, @source_sd and @source_pad change under the lock of the
+ * active state.
  */
 struct mtk_seninf_input {
 	enum mtk_seninf_port pad;
@@ -153,6 +196,10 @@ struct mtk_seninf_input {
 	struct phy *phy;
 	enum mtk_seninf_phy_mode phy_mode;
 
+	struct mtk_seninf_source sources[SENINF_MAX_NUM_SOURCES];
+	unsigned int num_sources;
+	struct mtk_seninf_source *active;
+
 	struct v4l2_mbus_config_mipi_csi2 bus;
 
 	struct v4l2_subdev *source_sd;
@@ -160,6 +207,8 @@ struct mtk_seninf_input {
 
 	struct v4l2_subdev *lens;
 	bool lens_active;
+	bool phy_on;
+	unsigned int users;
 };
 
 /**
@@ -168,12 +217,16 @@ struct mtk_seninf_input {
  * @mux_id: MUX hardware instance ID
  * @base: Memory mapped I/O based address
  * @seninf: Back pointer to the mtk_seninf
+ * @cam_mux_en: MT6785: CAM mux outputs enabled for this MUX
+ * @stream: MT6785: stream of the input this MUX carries
  */
 struct mtk_seninf_mux {
 	unsigned int pad;
 	unsigned int mux_id;
 	void __iomem *base;
 	struct mtk_seninf *seninf;
+	u32 cam_mux_en;
+	u32 stream;
 };
 
 /**
@@ -192,6 +245,11 @@ struct mtk_seninf_mux {
  * @inputs: Array of SENINF inputs
  * @muxes: Array of MUXes
  * @conf: Model-specific SENINF parameters
+ * @streaming: Source pads with a running stream (BIT(pad)), protected by
+ *	the lock of the active state
+ * @sleeping: A system sleep is in progress (from .prepare to .complete).
+ *	User space is frozen then: streams stop and start only from the
+ *	system sleep callbacks of the CAMSVs.
  */
 struct mtk_seninf {
 	struct device *dev;
@@ -212,6 +270,8 @@ struct mtk_seninf {
 
 	const struct mtk_seninf_conf *conf;
 	struct dentry *dbg;
+	u32 streaming;
+	bool sleeping;
 };
 
 inline struct mtk_seninf *sd_to_mtk_seninf(struct v4l2_subdev *sd)
@@ -316,6 +376,10 @@ static const struct mtk_seninf_format_info mtk_seninf_formats[] = {
 		.code = MEDIA_BUS_FMT_SRGGB16_1X16,
 		.flags = MTK_SENINF_FORMAT_BAYER,
 		.bpp = 16,
+	}, {
+		/* phase detection pixels on a virtual channel of their own */
+		.code = MEDIA_BUS_FMT_Y10_1X10,
+		.bpp = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_UYVY8_1X16,
 		.bpp = 16,
@@ -549,14 +613,11 @@ static s64 mtk_seninf_get_clk_divider(struct mtk_seninf_input *input,
 {
 	struct media_entity *entity = &input->seninf->subdev.entity;
 	struct media_pad *pad;
-	struct v4l2_subdev *sd;
 	s64 link_frequency, pixel_clock;
 
 	pad = media_pad_remote_pad_first(&entity->pads[pad_num]);
 
-	sd = media_entity_to_v4l2_subdev(pad->entity);
-	link_frequency = v4l2_get_link_freq(sd->ctrl_handler, bpp,
-					    num_data_lanes * 2);
+	link_frequency = v4l2_get_link_freq(pad, bpp, num_data_lanes * 2);
 	pixel_clock = div_u64(link_frequency * 2 * num_data_lanes, bpp);
 	/*
 	 * According to datasheet: Sensor master clock = ISP_clock/(CLKCNT +1)
@@ -845,7 +906,13 @@ static void mtk_seninf_lens_set(struct mtk_seninf_input *input, bool on)
 			return;
 		}
 		input->lens_active = true;
-	} else if (!input->lens_active) {
+	} else if (!input->lens_active || input->seninf->sleeping) {
+		/*
+		 * A stream stopped for a system sleep keeps the lens and its
+		 * position: the lens parks and returns to that position in
+		 * its own system sleep callbacks, and the restart after the
+		 * sleep finds the lens active and leaves it alone.
+		 */
 		return;
 	}
 
@@ -867,11 +934,519 @@ static void mtk_seninf_lens_set(struct mtk_seninf_input *input, bool on)
 	}
 }
 
-static void mtk_seninf_start(struct mtk_seninf *priv,
+/* -----------------------------------------------------------------------------
+ * MT6785 ("csi_phy_2_0" generation)
+ *
+ * Same building blocks as above, but a different register map: the TOP MUX
+ * selects the source SENINF of each MUX, the CAM MUX block at 0x400 selects
+ * the source MUX of each of the 11 CAM mux outputs (CAM A, CAM B, CAMSV1..6,
+ * ...), and the CSI-2 receiver has its own register block at 0xa00 in each
+ * SENINF. The analog PHY and the D-PHY lane/timing registers belong to the
+ * CSI-RX PHY driver.
+ */
+
+static u32 mtk_seninf_mt6785_dt(u32 code)
+{
+	const struct mtk_seninf_format_info *fmtinfo = mtk_seninf_format_info(code);
+
+	switch (fmtinfo ? fmtinfo->bpp : 10) {
+	case 8:
+		return MIPI_CSI2_DT_RAW8;
+	case 12:
+		return MIPI_CSI2_DT_RAW12;
+	case 14:
+		return MIPI_CSI2_DT_RAW14;
+	default:
+		return MIPI_CSI2_DT_RAW10;
+	}
+}
+
+static void mtk_seninf_mt6785_cam_mux(struct mtk_seninf *priv,
+				      unsigned int k, unsigned int mux_id,
+				      u32 width, u32 height,
+				      unsigned int pix_mode)
+{
+	void __iomem *cm = priv->base + MT6785_SENINF_CAM_MUX_BASE;
+	u32 val;
+
+	val = readl(cm + MT6785_CAM_MUX_CTRL(k));
+	val &= ~(0xf << MT6785_CAM_MUX_CTRL_SHIFT(k));
+	val |= (mux_id & 0xf) << MT6785_CAM_MUX_CTRL_SHIFT(k);
+	writel(val, cm + MT6785_CAM_MUX_CTRL(k));
+
+	writel(width | (height << 16), cm + MT6785_CAM_MUX_CHK_CTL_1(k));
+	val = readl(cm + MT6785_CAM_MUX_CHK_CTL_0(k));
+	val &= ~MT6785_CAM_MUX_CHK_PIX_MODE;
+	val |= FIELD_PREP(MT6785_CAM_MUX_CHK_PIX_MODE, pix_mode);
+	writel(val, cm + MT6785_CAM_MUX_CHK_CTL_0(k));
+
+	writel(readl(cm + MT6785_CAM_MUX_EN) | BIT(k), cm + MT6785_CAM_MUX_EN);
+	writel(readl(cm + MT6785_CAM_MUX_IRQ_EN) | (3 << (2 * k)),
+	       cm + MT6785_CAM_MUX_IRQ_EN);
+	writel(3 << (2 * k), cm + MT6785_CAM_MUX_IRQ_STATUS);
+}
+
+/* Link frequency of the source connected to an input, in Hz. */
+static s64 mtk_seninf_mt6785_link_freq(struct mtk_seninf_input *input,
+				       const struct v4l2_mbus_framefmt *format)
+{
+	const struct mtk_seninf_format_info *fmtinfo;
+
+	fmtinfo = mtk_seninf_format_info(format->code);
+	if (!fmtinfo)
+		return -EINVAL;
+
+	return v4l2_get_link_freq(input->source_pad, fmtinfo->bpp,
+				  2 * input->bus.num_data_lanes);
+}
+
+/*
+ * Pixels per clock of the MUX and CAM mux path for a stream: the smallest
+ * mode in which the CSI-2 pixel rate of the source fits into the CAM clock
+ * (the camsys clock of the SENINF). At a 560 MHz CAM clock one pixel per
+ * clock carries a pixel rate of 298 MHz, 680 MHz need two.
+ */
+static int mtk_seninf_mt6785_pix_mode(struct mtk_seninf *priv,
+				      struct v4l2_subdev_state *state,
+				      struct mtk_seninf_input *input)
+{
+	const struct mtk_seninf_format_info *fmtinfo;
+	const struct v4l2_mbus_framefmt *format;
+	unsigned long cam_rate;
+	u64 pixel_rate;
+	s64 link_freq;
+	int mode;
+
+	if (mt6785_pix_mode >= 0)
+		return min(mt6785_pix_mode, 2);
+
+	format = v4l2_subdev_state_get_format(state, input->pad, 0);
+	fmtinfo = mtk_seninf_format_info(format->code);
+	link_freq = mtk_seninf_mt6785_link_freq(input, format);
+	cam_rate = clk_get_rate(priv->clks[0].clk);
+	if (!fmtinfo || link_freq <= 0 || !cam_rate)
+		return 0;
+
+	pixel_rate = div_u64((u64)link_freq * 2 * input->bus.num_data_lanes,
+			     fmtinfo->bpp);
+	for (mode = 0; mode < 2; mode++)
+		if (pixel_rate <= (u64)cam_rate << mode)
+			break;
+
+	return mode;
+}
+
+/* The SENINF input routed to a source pad, with a bound source. */
+static struct mtk_seninf_input *
+mtk_seninf_routed_input(struct mtk_seninf *priv,
+			struct v4l2_subdev_state *state, unsigned int pad)
+{
+	struct mtk_seninf_input *input;
+	u32 sink_pad;
+
+	if (v4l2_subdev_routing_find_opposite_end(&state->routing, pad, 0,
+						  &sink_pad, NULL))
+		return NULL;
+
+	input = &priv->inputs[sink_pad];
+	if (!input->base || !input->source_sd)
+		return NULL;
+
+	return input;
+}
+
+static const struct v4l2_subdev_ops seninf_subdev_ops;
+
+int mtk_seninf_pixel_mode(struct v4l2_subdev *sd, unsigned int pad)
+{
+	struct mtk_seninf *priv = sd_to_mtk_seninf(sd);
+	struct mtk_seninf_input *input;
+	struct v4l2_subdev_state *state;
+	int mode;
+
+	if (sd->ops != &seninf_subdev_ops)
+		return -EINVAL;
+	if (!priv->conf->csi_phy_2_0)
+		return -EOPNOTSUPP;
+	if (!mtk_seninf_pad_is_source(priv, pad))
+		return -EINVAL;
+
+	state = v4l2_subdev_lock_and_get_active_state(sd);
+	input = mtk_seninf_routed_input(priv, state, pad);
+	mode = input ? mtk_seninf_mt6785_pix_mode(priv, state, input) : -ENOLINK;
+	v4l2_subdev_unlock_state(state);
+
+	return mode;
+}
+EXPORT_SYMBOL_GPL(mtk_seninf_pixel_mode);
+
+/*
+ * Virtual channel and data type of a stream of the source connected to an
+ * input. A sensor without the streams API sends its image as stream 0 and
+ * describes further streams (other virtual channels) only in its frame
+ * descriptor. Stream 0 keeps the data type of its bus code; a source without
+ * a frame descriptor sends it on virtual channel 0.
+ */
+static int mtk_seninf_stream_vc_dt(struct mtk_seninf_input *input,
+				   struct v4l2_subdev_state *state, u32 stream,
+				   u8 *vc, u8 *dt)
+{
+	const struct v4l2_mbus_framefmt *format;
+	struct v4l2_mbus_frame_desc fd = { };
+	unsigned int i;
+	int ret;
+
+	format = v4l2_subdev_state_get_format(state, input->pad, stream);
+	if (!format)
+		return -EINVAL;
+
+	ret = v4l2_subdev_call(input->source_sd, pad, get_frame_desc,
+			       input->source_pad->index, &fd);
+	if (ret == -ENOIOCTLCMD && stream == 0) {
+		*vc = 0;
+		*dt = mtk_seninf_mt6785_dt(format->code);
+		return 0;
+	}
+	if (ret)
+		return ret;
+	if (fd.type != V4L2_MBUS_FRAME_DESC_TYPE_CSI2)
+		return -EINVAL;
+
+	for (i = 0; i < fd.num_entries; i++) {
+		if (fd.entry[i].stream != stream)
+			continue;
+
+		*vc = fd.entry[i].bus.csi2.vc;
+		*dt = stream ? fd.entry[i].bus.csi2.dt :
+			       mtk_seninf_mt6785_dt(format->code);
+		return 0;
+	}
+
+	return -EPIPE;
+}
+
+/*
+ * The CSI-2 receiver of an input, set up for the first stream that starts:
+ * one receiver stream per active route from the input, stream s on output
+ * channel s. While the input runs it passes all of them; a MUX picks its
+ * stream by the channel.
+ */
+static int mtk_seninf_mt6785_input_start(struct mtk_seninf *priv,
+					 struct v4l2_subdev_state *state,
+					 struct mtk_seninf_input *input)
+{
+	unsigned int csi = input->pad == CSI_PORT_0B ? CSI_PORT_0 : input->pad;
+	u32 di[MT6785_SENINF_CSI2_NUM_STREAMS] = { };
+	unsigned int lanes = input->bus.num_data_lanes;
+	const struct v4l2_mbus_framefmt *format;
+	union phy_configure_opts opts = { };
+	struct v4l2_subdev_route *route;
+	unsigned int s;
+	s64 link_freq;
+	u8 vc, dt;
+	u32 val;
+	int ret;
+
+	for_each_active_route(&state->routing, route) {
+		if (route->sink_pad != input->pad)
+			continue;
+
+		s = route->sink_stream;
+		if (s >= MT6785_SENINF_CSI2_NUM_STREAMS)
+			continue;
+		ret = mtk_seninf_stream_vc_dt(input, state, s, &vc, &dt);
+		if (ret) {
+			dev_err(priv->dev, "no virtual channel for stream %u of port %u: %d\n",
+				s, input->pad, ret);
+			return ret;
+		}
+		di[s] = FIELD_PREP(MT6785_CSI2_DT_SEL, dt) |
+			FIELD_PREP(MT6785_CSI2_VC_SEL, vc) |
+			FIELD_PREP(MT6785_CSI2_DT_INTERLEAVE_MODE, 1) |
+			MT6785_CSI2_VC_INTERLEAVE_EN;
+	}
+
+	/* The PHY needs the lane rate (deskew above 1.427 Gbit/s). */
+	format = v4l2_subdev_state_get_format(state, input->pad, 0);
+	link_freq = mtk_seninf_mt6785_link_freq(input, format);
+	if (link_freq < 0) {
+		dev_err(priv->dev, "no link frequency for port %u: %lld\n",
+			input->pad, link_freq);
+		return link_freq;
+	}
+	opts.mipi_dphy.hs_clk_rate = 2 * link_freq;
+	opts.mipi_dphy.lanes = lanes;
+	ret = phy_configure(input->phy, &opts);
+	if (ret && ret != -EOPNOTSUPP) {
+		dev_err(priv->dev, "PHY configuration failed: %d\n", ret);
+		return ret;
+	}
+
+	/* Reset the CSI-2 receiver */
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI_CTRL) |
+			       MT6785_SENINF_CSI2_SW_RST);
+	udelay(1);
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI_CTRL) &
+			       ~MT6785_SENINF_CSI2_SW_RST);
+
+	/* CSI-2 receiver, D-PHY */
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI2_RESYNC_MERGE_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_RESYNC_MERGE_CTRL) |
+			       MT6785_CSI2_RESYNC_CYCLE_CNT_OPT);
+	val = mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_HDR_MODE_0);
+	val &= ~(MT6785_CSI2_HEADER_MODE | MT6785_CSI2_HEADER_LEN);
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI2_HDR_MODE_0, val);
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI2_OPT,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_OPT) &
+			       ~MT6785_CSI2_CPHY_SEL);
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI2_IRQ_EN,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_IRQ_EN) |
+			       MT6785_CSI2_IRQ_CLR_MODE);
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI2_EN, BIT(lanes) - 1);
+
+	/*
+	 * Receiver streams and output channels for a sensor with phase
+	 * detection data: image on stream and channel 0, the second virtual
+	 * channel on stream and channel 1.
+	 */
+	for (s = 0; s < MT6785_SENINF_CSI2_NUM_STREAMS; s++) {
+		if (di[s]) {
+			mtk_seninf_input_write(input,
+					       MT6785_SENINF_CSI2_DI_CTRL(s), di[s]);
+			mtk_seninf_input_write(input,
+					       MT6785_SENINF_CSI2_CH_CTRL(s),
+					       MT6785_CSI2_CH_STREAM(s));
+		} else if (s) {
+			mtk_seninf_input_write(input,
+					       MT6785_SENINF_CSI2_CH_CTRL(s), 0);
+		}
+	}
+
+	/* Enable the SENINF and its CSI-2 path */
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI_CTRL) |
+			       MT6785_SENINF_CSI_CSI2_EN);
+	mtk_seninf_input_write(input, MT6785_SENINF_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CTRL) |
+			       MT6785_SENINF_EN);
+
+	/* Port operation mode: D-PHY */
+	val = mtk_seninf_read(priv, MT6785_SENINF_TOP_PHY_CTRL_CSI(csi));
+	val &= ~MT6785_PHY_CTRL_CPHY_EN;
+	val |= MT6785_PHY_CTRL_DPHY_EN;
+	mtk_seninf_write(priv, MT6785_SENINF_TOP_PHY_CTRL_CSI(csi), val);
+
+	return 0;
+}
+
+/* The MUX and the CAM mux outputs of one stream of an input */
+static void mtk_seninf_mt6785_mux_start(struct mtk_seninf *priv,
+					struct v4l2_subdev_state *state,
+					struct mtk_seninf_input *input,
+					struct mtk_seninf_mux *mux, u32 stream,
+					int pix_mode)
+{
+	void __iomem *cm = priv->base + MT6785_SENINF_CAM_MUX_BASE;
+	unsigned int out = mux->pad - priv->conf->nb_inputs;
+	const struct v4l2_mbus_framefmt *format;
+	unsigned int shift, k;
+	u32 val, opt = 0;
+	u8 vc, dt;
+
+	format = v4l2_subdev_state_get_format(state, input->pad, stream);
+	mux->stream = stream;
+
+	/*
+	 * The CAM mux of a further virtual channel (phase detection data)
+	 * passes only its channel and data type. Stream 0 keeps the CAM mux
+	 * without a filter.
+	 */
+	if (stream && !mtk_seninf_stream_vc_dt(input, state, stream, &vc, &dt))
+		opt = FIELD_PREP(MT6785_CAM_MUX_OPT_VC_SEL, vc) |
+		      FIELD_PREP(MT6785_CAM_MUX_OPT_DT_SEL, dt) |
+		      MT6785_CAM_MUX_OPT_VC_EN | MT6785_CAM_MUX_OPT_DT_EN;
+
+	/* TOP MUX: MUX m <- SENINF n */
+	if (mux->mux_id < 4) {
+		shift = 8 * mux->mux_id;
+		val = mtk_seninf_read(priv, MT6785_SENINF_TOP_MUX_CTRL_0);
+		val &= ~(0xf << shift);
+		val |= input->seninf_id << shift;
+		mtk_seninf_write(priv, MT6785_SENINF_TOP_MUX_CTRL_0, val);
+	} else {
+		shift = 8 * (mux->mux_id - 4);
+		val = mtk_seninf_read(priv, MT6785_SENINF_TOP_MUX_CTRL_1);
+		val &= ~(0xf << shift);
+		val |= input->seninf_id << shift;
+		mtk_seninf_write(priv, MT6785_SENINF_TOP_MUX_CTRL_1, val);
+	}
+
+	/* MUX: CSI-2 channel of the stream, pixel mode, sync polarity, reset, enable */
+	val = mtk_seninf_mux_read(mux, MT6785_SENINF_MUX_CTRL_1);
+	val &= ~(MT6785_SENINF_MUX_SRC_SEL | MT6785_SENINF_MUX_PIX_MODE);
+	val |= FIELD_PREP(MT6785_SENINF_MUX_SRC_SEL,
+			  test_pattern ? MT6785_MUX_SRC_TEST_MODEL :
+					 MT6785_MUX_SRC_MIPI + stream);
+	val |= FIELD_PREP(MT6785_SENINF_MUX_PIX_MODE, pix_mode);
+	mtk_seninf_mux_write(mux, MT6785_SENINF_MUX_CTRL_1, val);
+	mtk_seninf_mux_write(mux, MT6785_SENINF_MUX_OPT,
+			     mtk_seninf_mux_read(mux, MT6785_SENINF_MUX_OPT) &
+			     ~(MT6785_SENINF_MUX_HSYNC_POL |
+			       MT6785_SENINF_MUX_VSYNC_POL));
+	val = mtk_seninf_mux_read(mux, MT6785_SENINF_MUX_CTRL_0);
+	mtk_seninf_mux_write(mux, MT6785_SENINF_MUX_CTRL_0,
+			     val | MT6785_SENINF_MUX_IRQ_SW_RST |
+			     MT6785_SENINF_MUX_SW_RST);
+	mtk_seninf_mux_write(mux, MT6785_SENINF_MUX_CTRL_0,
+			     (val & ~(MT6785_SENINF_MUX_IRQ_SW_RST |
+				      MT6785_SENINF_MUX_SW_RST)) |
+			     MT6785_SENINF_MUX_EN);
+
+	if (test_pattern && !stream) {
+		/* Test model */
+		mtk_seninf_input_write(input, MT6785_SENINF_TESTMDL_CTRL,
+				       MT6785_SENINF_TESTMDL_EN);
+		mtk_seninf_input_write(input, MT6785_SENINF_TM_SIZE, 0x10001f00);
+		mtk_seninf_input_write(input, MT6785_SENINF_TM_CLK, 0x7);
+		mtk_seninf_input_write(input, MT6785_SENINF_TM_CTL, 0x00300161);
+	}
+
+	/* CAM MUX: output pad i feeds CAM mux cam_mux_out + i, or all */
+	mux->cam_mux_en = 0;
+	if (cam_mux_out < 0) {
+		for (k = 0; k < MT6785_NUM_CAM_MUXES; k++)
+			mux->cam_mux_en |= BIT(k);
+	} else {
+		k = cam_mux_out + out;
+		if (k < MT6785_NUM_CAM_MUXES)
+			mux->cam_mux_en |= BIT(k);
+	}
+	for (k = 0; k < MT6785_NUM_CAM_MUXES; k++) {
+		if (!(mux->cam_mux_en & BIT(k)))
+			continue;
+		if (opt)
+			writel(opt, cm + MT6785_CAM_MUX_OPT(k));
+		mtk_seninf_mt6785_cam_mux(priv, k, mux->mux_id, format->width,
+					  format->height, pix_mode);
+	}
+}
+
+static void mtk_seninf_mt6785_stop(struct mtk_seninf_input *input,
+				   struct mtk_seninf_mux *mux);
+
+/* Start a stream of an input, and the input itself for its first stream. */
+static int mtk_seninf_mt6785_start(struct mtk_seninf *priv,
+				   struct v4l2_subdev_state *state,
+				   struct mtk_seninf_input *input,
+				   struct mtk_seninf_mux *mux, u32 stream)
+{
+	const struct v4l2_mbus_framefmt *format;
+	int pix_mode, ret;
+
+	pix_mode = mtk_seninf_mt6785_pix_mode(priv, state, input);
+
+	if (!input->users) {
+		ret = mtk_seninf_mt6785_input_start(priv, state, input);
+		if (ret)
+			return ret;
+	}
+
+	mtk_seninf_mt6785_mux_start(priv, state, input, mux, stream, pix_mode);
+
+	/* PHY last: analog part, then the D-PHY lane mapping (vendor order) */
+	if (!input->users) {
+		ret = phy_power_on(input->phy);
+		if (ret) {
+			dev_err(priv->dev, "PHY power on failed: %d\n", ret);
+			mtk_seninf_mt6785_stop(input, mux);
+			return ret;
+		}
+		input->phy_on = true;
+
+		mtk_seninf_lens_set(input, true);
+	}
+
+	format = v4l2_subdev_state_get_format(state, input->pad, stream);
+	dev_dbg(priv->dev,
+		"start: seninf%u stream %u mux%u %ux%u code 0x%x lanes %u pix mode %d DI %08x/%08x CH %08x/%08x TOP_MUX %08x/%08x CAM_MUX %08x/%08x/%08x\n",
+		input->seninf_id + 1, stream, mux->mux_id, format->width,
+		format->height, format->code, input->bus.num_data_lanes,
+		pix_mode,
+		mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_DI_CTRL(0)),
+		mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_DI_CTRL(1)),
+		mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_CH_CTRL(0)),
+		mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_CH_CTRL(1)),
+		mtk_seninf_read(priv, MT6785_SENINF_TOP_MUX_CTRL_0),
+		mtk_seninf_read(priv, MT6785_SENINF_TOP_MUX_CTRL_1),
+		readl(priv->base + MT6785_SENINF_CAM_MUX_BASE + MT6785_CAM_MUX_CTRL(0)),
+		readl(priv->base + MT6785_SENINF_CAM_MUX_BASE + MT6785_CAM_MUX_CTRL(4)),
+		readl(priv->base + MT6785_SENINF_CAM_MUX_BASE + MT6785_CAM_MUX_CTRL(8)));
+
+	return 0;
+}
+
+/*
+ * Stop a stream of an input, and the input itself once no other stream runs
+ * (input->users already counts this stream out).
+ */
+static void mtk_seninf_mt6785_stop(struct mtk_seninf_input *input,
+				   struct mtk_seninf_mux *mux)
+{
+	struct mtk_seninf *priv = input->seninf;
+	void __iomem *cm = priv->base + MT6785_SENINF_CAM_MUX_BASE;
+	unsigned int k;
+	u32 pkts, irq;
+
+	pkts = mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_PACKET_CNT_STATUS);
+	irq = mtk_seninf_inuput_read(input, MT6785_SENINF_CSI2_IRQ_STATUS);
+	dev_dbg(priv->dev, "stop: seninf%u stream %u packets %08x csi2 irq %08x mux irq %08x cam mux irq %08x\n",
+		input->seninf_id + 1, mux->stream, pkts, irq,
+		mtk_seninf_mux_read(mux, MT6785_SENINF_MUX_IRQ_STATUS),
+		readl(cm + MT6785_CAM_MUX_IRQ_STATUS));
+
+	mtk_seninf_mux_write(mux, MT6785_SENINF_MUX_CTRL_0,
+			     mtk_seninf_mux_read(mux, MT6785_SENINF_MUX_CTRL_0) &
+			     ~MT6785_SENINF_MUX_EN);
+	/* only the CAM mux outputs of this stream, the other may still run */
+	writel(readl(cm + MT6785_CAM_MUX_EN) & ~mux->cam_mux_en,
+	       cm + MT6785_CAM_MUX_EN);
+	if (mux->stream)
+		for (k = 0; k < MT6785_NUM_CAM_MUXES; k++)
+			if (mux->cam_mux_en & BIT(k))
+				writel(0, cm + MT6785_CAM_MUX_OPT(k));
+	mux->cam_mux_en = 0;
+
+	if (input->users)
+		return;
+
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI2_EN, 0);
+	mtk_seninf_input_write(input, MT6785_SENINF_TESTMDL_CTRL, 0);
+	mtk_seninf_input_write(input, MT6785_SENINF_TM_CTL, 0);
+	mtk_seninf_input_write(input, MT6785_SENINF_CSI_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CSI_CTRL) &
+			       ~MT6785_SENINF_CSI_CSI2_EN);
+	mtk_seninf_input_write(input, MT6785_SENINF_CTRL,
+			       mtk_seninf_inuput_read(input, MT6785_SENINF_CTRL) &
+			       ~MT6785_SENINF_EN);
+
+	mtk_seninf_lens_set(input, false);
+
+	/* only if the start reached it (power_on and power_off pair up) */
+	if (input->phy_on)
+		phy_power_off(input->phy);
+	input->phy_on = false;
+}
+
+static int mtk_seninf_start(struct mtk_seninf *priv,
 			    struct v4l2_subdev_state *state,
 			    struct mtk_seninf_input *input,
-			    struct mtk_seninf_mux *mux)
+			    struct mtk_seninf_mux *mux, u32 stream)
 {
+	if (priv->conf->csi_phy_2_0)
+		return mtk_seninf_mt6785_start(priv, state, input, mux, stream);
+
 	if (priv->conf->init_top_ctrl) {
 		/* As the ChromeOS MT8183 driver: SENINF_PCLK_EN | SENINF2_PCLK_EN. */
 		mtk_seninf_write(priv, SENINF_TOP_CTRL,
@@ -891,11 +1466,19 @@ static void mtk_seninf_start(struct mtk_seninf *priv,
 
 	if (test_pattern)
 		mtk_seninf_test_pattern(input, mux, state);
+
+	return 0;
 }
 
-static void mtk_seninf_stop(struct mtk_seninf_input *input)
+static void mtk_seninf_stop(struct mtk_seninf_input *input,
+			    struct mtk_seninf_mux *mux)
 {
 	unsigned int val;
+
+	if (input->seninf->conf->csi_phy_2_0) {
+		mtk_seninf_mt6785_stop(input, mux);
+		return;
+	}
 
 	/* Disable CSI2(2.5G) first */
 	val = mtk_seninf_inuput_read(input, SENINF_CSI2_CTL);
@@ -923,7 +1506,7 @@ static int seninf_enable_streams(struct v4l2_subdev *sd,
 	struct mtk_seninf_input *input;
 	struct mtk_seninf_mux *mux;
 	struct v4l2_subdev *source;
-	u32 sink_pad;
+	u32 sink_pad, sink_stream;
 	int ret;
 
 	/* Stream control can only operate on source pads. */
@@ -933,7 +1516,7 @@ static int seninf_enable_streams(struct v4l2_subdev *sd,
 
 	/* Locate the SENINF input and MUX for the source pad. */
 	ret = v4l2_subdev_routing_find_opposite_end(&state->routing, pad,
-						    0, &sink_pad, NULL);
+						    0, &sink_pad, &sink_stream);
 	if (ret) {
 		dev_dbg(priv->dev, "No sink pad routed to source pad %u\n",
 			pad);
@@ -943,27 +1526,55 @@ static int seninf_enable_streams(struct v4l2_subdev *sd,
 	input = &priv->inputs[sink_pad];
 	mux = &priv->muxes[pad - priv->conf->nb_inputs];
 
+	/* The routed sink must have an endpoint and a bound source. */
+	if (!input->base || !input->source_sd) {
+		dev_err(priv->dev, "no source on sink pad %u (routed to pad %u)\n",
+			sink_pad, pad);
+		return -ENOLINK;
+	}
+
 	ret = pm_runtime_resume_and_get(priv->dev);
 	if (ret < 0) {
 		dev_err(priv->dev, "failed to get pm_runtime: %d\n", ret);
 		return ret;
 	}
 
-	/* Start the SENINF first and then the source. */
-	mtk_seninf_start(priv, state, input, mux);
+	/*
+	 * Start the SENINF first and then the source. The source sends all
+	 * its streams (virtual channels) at once: it starts with the first
+	 * stream of the input and stops with the last one.
+	 */
+	ret = mtk_seninf_start(priv, state, input, mux, sink_stream);
+	if (ret)
+		goto err_pm;
 
-	source = input->source_sd;
-	ret = v4l2_subdev_enable_streams(source, input->source_pad->index, BIT(0));
-	if (ret) {
-		dev_err(priv->dev, "failed to start source %s: %d\n",
-			source->entity.name, ret);
-		goto err_no_stream;
+	if (!input->users) {
+		source = input->source_sd;
+		ret = v4l2_subdev_enable_streams(source,
+						 input->source_pad->index,
+						 BIT(0));
+		if (ret) {
+			dev_err(priv->dev, "failed to start source %s: %d\n",
+				source->entity.name, ret);
+			goto err_no_stream;
+		}
+
+		/* PHY checks that need the data lanes running (MT6785 deskew) */
+		if (priv->conf->csi_phy_2_0) {
+			ret = phy_calibrate(input->phy);
+			if (ret && ret != -EOPNOTSUPP)
+				dev_warn(priv->dev, "PHY calibration: %d\n", ret);
+		}
 	}
+
+	input->users++;
+	priv->streaming |= BIT(pad);
 
 	return 0;
 
 err_no_stream:
-	mtk_seninf_stop(input);
+	mtk_seninf_stop(input, mux);
+err_pm:
 	pm_runtime_mark_last_busy(priv->dev);
 	pm_runtime_put_autosuspend(priv->dev);
 
@@ -976,6 +1587,7 @@ static int seninf_disable_streams(struct v4l2_subdev *sd,
 {
 	struct mtk_seninf *priv = sd_to_mtk_seninf(sd);
 	struct mtk_seninf_input *input;
+	struct mtk_seninf_mux *mux;
 	struct v4l2_subdev *source;
 	u32 sink_pad;
 	int ret;
@@ -995,18 +1607,36 @@ static int seninf_disable_streams(struct v4l2_subdev *sd,
 	}
 
 	input = &priv->inputs[sink_pad];
+	mux = &priv->muxes[pad - priv->conf->nb_inputs];
 
+	/* Only reachable after a successful enable, which checked the input. */
+	if (WARN_ON(!input->base || !input->users))
+		return -EINVAL;
+
+	/* The source may already be unbound (notifier teardown). */
 	source = input->source_sd;
-	ret = v4l2_subdev_disable_streams(source, input->source_pad->index, BIT(0));
-	if (ret)
-		dev_err(priv->dev,
-			"failed to stop source %s: %d\n",
-			source->entity.name, ret);
+	if (source && input->users == 1) {
+		ret = v4l2_subdev_disable_streams(source,
+						  input->source_pad->index,
+						  BIT(0));
+		if (ret)
+			dev_err(priv->dev, "failed to stop source %s: %d\n",
+				source->entity.name, ret);
+	}
 
-	mtk_seninf_stop(input);
+	input->users--;
+	mtk_seninf_stop(input, mux);
 	pm_runtime_mark_last_busy(priv->dev);
 	pm_runtime_put_autosuspend(priv->dev);
-	return ret;
+	priv->streaming &= ~BIT(pad);
+
+	/*
+	 * The stream is stopped here even if the source failed to stop: an
+	 * error would leave it enabled for the V4L2 core, its next start would
+	 * fail with -EALREADY and its next stop drop the runtime PM reference
+	 * a second time.
+	 */
+	return 0;
 }
 
 static const struct v4l2_mbus_framefmt mtk_seninf_default_fmt = {
@@ -1020,10 +1650,66 @@ static const struct v4l2_mbus_framefmt mtk_seninf_default_fmt = {
 	.quantization = V4L2_QUANTIZATION_DEFAULT,
 };
 
+/*
+ * Whether the stream through @pad (sink or source end) runs. Called with the
+ * lock of the active state held, which also protects priv->streaming.
+ */
+static bool mtk_seninf_pad_streaming(struct mtk_seninf *priv,
+				     struct v4l2_subdev_state *state,
+				     u32 pad, u32 stream)
+{
+	u32 source = pad;
+
+	if (mtk_seninf_pad_is_sink(priv, pad) &&
+	    v4l2_subdev_routing_find_opposite_end(&state->routing, pad, stream,
+						  &source, NULL))
+		return false;
+
+	return priv->streaming & BIT(source);
+}
+
+/* The same routes, in any order */
+static bool mtk_seninf_routing_equal(const struct v4l2_subdev_krouting *a,
+				     const struct v4l2_subdev_krouting *b)
+{
+	unsigned int i, j;
+
+	if (a->num_routes != b->num_routes)
+		return false;
+
+	for (i = 0; i < a->num_routes; i++) {
+		const struct v4l2_subdev_route *ra = &a->routes[i];
+
+		for (j = 0; j < b->num_routes; j++) {
+			const struct v4l2_subdev_route *rb = &b->routes[j];
+
+			if (ra->sink_pad == rb->sink_pad &&
+			    ra->sink_stream == rb->sink_stream &&
+			    ra->source_pad == rb->source_pad &&
+			    ra->source_stream == rb->source_stream &&
+			    ra->flags == rb->flags)
+				break;
+		}
+		if (j == b->num_routes)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Each source pad carries one stream. A sink pad of the MT6785 SENINF takes
+ * up to MT6785_SENINF_CSI2_NUM_STREAMS streams (virtual channels of the
+ * sensor), the older SENINFs only stream 0.
+ */
 static int __seninf_set_routing(struct v4l2_subdev *sd,
 				struct v4l2_subdev_state *state,
 				struct v4l2_subdev_krouting *routing)
 {
+	struct mtk_seninf *priv = sd_to_mtk_seninf(sd);
+	u32 max_streams = priv->conf->csi_phy_2_0 ?
+			  MT6785_SENINF_CSI2_NUM_STREAMS : 1;
+	unsigned int i;
 	int ret;
 
 	ret = v4l2_subdev_routing_validate(sd, routing,
@@ -1031,8 +1717,31 @@ static int __seninf_set_routing(struct v4l2_subdev *sd,
 	if (ret)
 		return ret;
 
+	for (i = 0; i < routing->num_routes; i++) {
+		const struct v4l2_subdev_route *route = &routing->routes[i];
+
+		if (route->source_stream || route->sink_stream >= max_streams) {
+			dev_dbg(priv->dev, "route %u/%u -> %u/%u not supported\n",
+				route->sink_pad, route->sink_stream,
+				route->source_pad, route->source_stream);
+			return -EINVAL;
+		}
+	}
+
 	return v4l2_subdev_set_routing_with_fmt(sd, state, routing,
 						&mtk_seninf_default_fmt);
+}
+
+/* A sink port is connected when the DT graph has an (available) endpoint. */
+static bool mtk_seninf_port_connected(struct mtk_seninf *priv,
+				      unsigned int port)
+{
+	struct fwnode_handle *ep;
+
+	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(priv->dev), port, 0, 0);
+	fwnode_handle_put(ep);
+
+	return ep;
 }
 
 static int seninf_init_state(struct v4l2_subdev *sd,
@@ -1042,21 +1751,48 @@ static int seninf_init_state(struct v4l2_subdev *sd,
 	struct v4l2_subdev_route routes[SENINF_MAX_NUM_OUTPUTS] = { };
 	struct v4l2_subdev_krouting routing = {
 		.routes = routes,
-		.num_routes = priv->conf->nb_outputs,
+		.num_routes = min(priv->conf->nb_outputs, priv->conf->nb_inputs),
 	};
-	unsigned int i;
+	unsigned int sinks[SENINF_MAX_NUM_INPUTS];
+	unsigned int i, n = 0;
 
 	/*
-	 * Initialize one route for supported source pads.
-	 * It is a single route from the first sink pad to the source pad,
-	 * while on SENINF 5.0 the routing table will map sink pads to source
-	 * pads connected to CAMSV 1:1 (skipping the first two source pads
-	 * connected to the CAM instances).
+	 * A fixed table keeps every input on its own output: a sensor added
+	 * to one input does not move the streams of the others.
 	 */
+	if (priv->conf->default_routes) {
+		routing.num_routes = 0;
+		for (i = 0; i < priv->conf->nb_inputs; i++) {
+			struct v4l2_subdev_route *route;
+
+			if (!priv->conf->default_routes[i])
+				continue;
+
+			route = &routes[routing.num_routes++];
+			route->sink_pad = i;
+			route->source_pad = priv->conf->default_routes[i];
+			route->flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE;
+		}
+
+		return __seninf_set_routing(sd, state, &routing);
+	}
+
+	/*
+	 * Route the sink pads 1:1 to the source pads in order, the sink pads
+	 * with a connected sensor first: a board with a single sensor on CSI1
+	 * then streams from the first source pad without a routing change.
+	 */
+	for (i = 0; i < priv->conf->nb_inputs; i++)
+		if (mtk_seninf_port_connected(priv, i))
+			sinks[n++] = i;
+	for (i = 0; i < priv->conf->nb_inputs; i++)
+		if (!mtk_seninf_port_connected(priv, i))
+			sinks[n++] = i;
+
 	for (i = 0; i < routing.num_routes; i++) {
 		struct v4l2_subdev_route *route = &routes[i];
 
-		route->sink_pad = i;
+		route->sink_pad = sinks[i];
 		route->sink_stream = 0;
 		route->source_pad = priv->conf->nb_inputs + i;
 		route->source_stream = 0;
@@ -1101,6 +1837,11 @@ static int seninf_set_fmt(struct v4l2_subdev *sd,
 	 * no way to configure formats at all when no active input is selected.
 	 */
 
+	/* The hardware of a running stream keeps its format. */
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
+	    mtk_seninf_pad_streaming(priv, state, fmt->pad, fmt->stream))
+		return -EBUSY;
+
 	/*
 	 * Default to the first format if the requested media bus code isn't
 	 * supported.
@@ -1138,11 +1879,29 @@ static int seninf_set_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+/*
+ * A new routing table rebuilds the stream configurations of the state,
+ * which also hold the enabled flags of the running streams. Replaced under
+ * a running stream (libcamera resets the routing table of the seninf
+ * whenever a process enumerates the cameras), the stream would no longer be
+ * enabled for the V4L2 core: its stop would fail with -EALREADY before it
+ * reaches the seninf, and the sensor would keep streaming. While a stream
+ * runs, the same table is accepted and changes nothing, any other one is
+ * refused.
+ */
 static int seninf_set_routing(struct v4l2_subdev *sd,
 			      struct v4l2_subdev_state *state,
 			      enum v4l2_subdev_format_whence which,
 			      struct v4l2_subdev_krouting *routing)
 {
+	struct mtk_seninf *priv = sd_to_mtk_seninf(sd);
+
+	if (which == V4L2_SUBDEV_FORMAT_ACTIVE && priv->streaming) {
+		if (mtk_seninf_routing_equal(&state->routing, routing))
+			return 0;
+		return -EBUSY;
+	}
+
 	return __seninf_set_routing(sd, state, routing);
 }
 
@@ -1174,9 +1933,172 @@ static const struct v4l2_subdev_internal_ops seninf_subdev_internal_ops = {
  * Media Entity Operations
  */
 
+/*
+ * A source without the streams API (a sensor) has the implicit stream 0 and
+ * describes further streams on other virtual channels only in its frame
+ * descriptor. Validate stream 0 of the link by its formats as for any link,
+ * the other streams routed from the sink pad against the frame descriptor:
+ * the stream has to be in it, with the bus code of the sink stream if the
+ * entry names one.
+ */
+static int seninf_link_validate(struct media_link *link)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(link->sink->entity);
+	struct v4l2_subdev_format source_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+		.pad = link->source->index,
+	};
+	struct v4l2_subdev_format sink_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+		.pad = link->sink->index,
+	};
+	struct mtk_seninf *priv = sd_to_mtk_seninf(sd);
+	struct v4l2_mbus_frame_desc fd = { };
+	const struct v4l2_mbus_framefmt *format;
+	struct v4l2_subdev_state *state;
+	struct v4l2_subdev_route *route;
+	struct v4l2_subdev *source;
+	bool has_fd;
+	unsigned int i;
+	int ret;
+
+	if (!is_media_entity_v4l2_subdev(link->source->entity))
+		return -EINVAL;
+
+	source = media_entity_to_v4l2_subdev(link->source->entity);
+	if (source->flags & V4L2_SUBDEV_FL_STREAMS)
+		return v4l2_subdev_link_validate(link);
+
+	/* The source first, without the lock of the SENINF state */
+	ret = v4l2_subdev_call_state_active(source, pad, get_fmt, &source_fmt);
+	if (ret)
+		return ret;
+	ret = v4l2_subdev_call(source, pad, get_frame_desc, link->source->index,
+			       &fd);
+	if (ret && ret != -ENOIOCTLCMD)
+		return ret;
+	has_fd = !ret && fd.type == V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
+
+	state = v4l2_subdev_lock_and_get_active_state(sd);
+
+	for_each_active_route(&state->routing, route) {
+		if (route->sink_pad != link->sink->index)
+			continue;
+
+		if (!route->sink_stream) {
+			format = v4l2_subdev_state_get_format(state,
+							      route->sink_pad, 0);
+			sink_fmt.format = *format;
+			ret = v4l2_subdev_link_validate_default(sd, link,
+								&source_fmt,
+								&sink_fmt);
+			if (ret)
+				goto out;
+			continue;
+		}
+
+		ret = -EPIPE;
+		for (i = 0; has_fd && i < fd.num_entries; i++) {
+			if (fd.entry[i].stream != route->sink_stream)
+				continue;
+
+			format = v4l2_subdev_state_get_format(state,
+							      route->sink_pad,
+							      route->sink_stream);
+			if (fd.entry[i].pixelcode &&
+			    fd.entry[i].pixelcode != format->code) {
+				dev_dbg(priv->dev,
+					"stream %u: code 0x%04x, source sends 0x%04x\n",
+					route->sink_stream, format->code,
+					fd.entry[i].pixelcode);
+				goto out;
+			}
+			ret = 0;
+			break;
+		}
+		if (ret) {
+			dev_dbg(priv->dev, "stream %u not sent by %s\n",
+				route->sink_stream, source->entity.name);
+			goto out;
+		}
+	}
+
+	ret = 0;
+out:
+	v4l2_subdev_unlock_state(state);
+	return ret;
+}
+
+/*
+ * Make @src the source of @input (NULL: none). Called with the lock of the
+ * active state held.
+ */
+static void mtk_seninf_input_activate(struct mtk_seninf_input *input,
+				      struct mtk_seninf_source *src)
+{
+	input->active = src;
+	if (src)
+		input->bus = src->bus;
+	input->source_sd = src ? src->sd : NULL;
+	input->source_pad = src ? src->pad : NULL;
+}
+
+/*
+ * The links of an input with several sources: one at a time, as with a
+ * video mux. Enabling a link while another one of the input is enabled fails
+ * with -EBUSY, user space disables the old link first. The media core refuses
+ * any change while a stream runs through the sink pad; the stream count of
+ * the input guards the start that has not reached the pipeline yet.
+ */
+static int seninf_link_setup(struct media_entity *entity,
+			     const struct media_pad *local,
+			     const struct media_pad *remote, u32 flags)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
+	struct mtk_seninf *priv = sd_to_mtk_seninf(sd);
+	struct mtk_seninf_source *src = NULL;
+	struct v4l2_subdev_state *state;
+	struct mtk_seninf_input *input;
+	unsigned int i;
+	int ret = 0;
+
+	if (!mtk_seninf_pad_is_sink(priv, local->index))
+		return 0;
+
+	input = &priv->inputs[local->index];
+	for (i = 0; i < input->num_sources; i++)
+		if (input->sources[i].pad == remote)
+			src = &input->sources[i];
+	if (!src)
+		return -EINVAL;
+
+	state = v4l2_subdev_lock_and_get_active_state(sd);
+
+	if (flags & MEDIA_LNK_FL_ENABLED) {
+		if (input->active && input->active != src)
+			ret = -EBUSY;
+		else
+			mtk_seninf_input_activate(input, src);
+	} else if (input->active == src) {
+		if (input->users)
+			ret = -EBUSY;
+		else
+			mtk_seninf_input_activate(input, NULL);
+	}
+
+	v4l2_subdev_unlock_state(state);
+
+	if (ret)
+		dev_dbg(priv->dev, "link %s -> port %u: %d\n",
+			remote->entity->name, local->index, ret);
+
+	return ret;
+}
+
 static const struct media_entity_operations seninf_media_ops = {
 	.get_fwnode_pad = v4l2_subdev_get_fwnode_pad_1_to_1,
-	.link_validate = v4l2_subdev_link_validate,
+	.link_setup = seninf_link_setup,
+	.link_validate = seninf_link_validate,
 	.has_pad_interdep = v4l2_subdev_has_pad_interdep,
 };
 
@@ -1249,10 +2171,12 @@ static void seninf_subdev_cleanup(struct mtk_seninf *priv)
 struct mtk_seninf_async_subdev {
 	struct v4l2_async_connection asc;
 	struct mtk_seninf_input *input;
+	struct mtk_seninf_source *source;
 	unsigned int port;
 };
 
-static int mtk_seninf_fwnode_parse(struct device *dev, unsigned int id)
+static int mtk_seninf_fwnode_parse(struct device *dev, unsigned int id,
+				   unsigned int ep_id)
 {
 	static const char * const phy_names[] = {
 		"csi0", "csi1", "csi2", "csi0b"
@@ -1260,12 +2184,13 @@ static int mtk_seninf_fwnode_parse(struct device *dev, unsigned int id)
 	struct mtk_seninf *priv = dev_get_drvdata(dev);
 	struct fwnode_handle *ep, *fwnode;
 	struct mtk_seninf_input *input;
+	struct mtk_seninf_source *src;
 	struct mtk_seninf_async_subdev *asd;
 	struct v4l2_fwnode_endpoint vep = { .bus_type = V4L2_MBUS_CSI2_DPHY };
 	unsigned int port;
 	int ret;
 
-	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(dev), id, 0, 0);
+	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(dev), id, ep_id, 0);
 	if (!ep)
 		return 0;
 
@@ -1294,22 +2219,29 @@ static int mtk_seninf_fwnode_parse(struct device *dev, unsigned int id)
 
 	input = &priv->inputs[port];
 
-	input->pad = port;
-	input->seninf_id = port_to_seninf_id[port];
-	input->base = priv->base + 0x1000 * input->seninf_id;
-	input->seninf = priv;
+	if (!input->num_sources) {
+		input->pad = port;
+		input->seninf_id = port_to_seninf_id[port];
+		input->base = priv->base + 0x1000 * input->seninf_id;
+		input->seninf = priv;
 
-	input->bus = vep.bus.mipi_csi2;
+		/* until a source is active, the bus of the first one */
+		input->bus = vep.bus.mipi_csi2;
 
-	input->phy = devm_phy_get(dev, phy_names[port]);
-	if (IS_ERR(input->phy)) {
-		dev_err(dev, "failed to get phy: %ld\n", PTR_ERR(input->phy));
-		ret = PTR_ERR(input->phy);
-		goto out;
+		input->phy = devm_phy_get(dev, phy_names[port]);
+		if (IS_ERR(input->phy)) {
+			dev_err(dev, "failed to get phy: %ld\n", PTR_ERR(input->phy));
+			ret = PTR_ERR(input->phy);
+			goto out;
+		}
+		input->phy_mode = SENINF_PHY_MODE_4D1C;
 	}
-	input->phy_mode = SENINF_PHY_MODE_4D1C;
+
+	src = &input->sources[input->num_sources++];
+	src->bus = vep.bus.mipi_csi2;
 
 	asd->input = input;
+	asd->source = src;
 
 	ret = 0;
 out:
@@ -1335,7 +2267,12 @@ static int mtk_seninf_notifier_bound(struct v4l2_async_notifier *notifier,
 
 	if (mtk_seninf_pad_is_sink(priv, asd->port)) {
 		struct mtk_seninf_input *input = asd->input;
-		struct media_pad *source_pad;
+		struct mtk_seninf_source *src = asd->source;
+		struct media_pad *sink = &priv->pads[input->pad];
+		struct v4l2_subdev_state *state;
+		struct media_link *mlink;
+		bool enable;
+		u32 flags;
 
 		link = device_link_add(priv->dev, sd->dev,
 				       DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS);
@@ -1346,19 +2283,39 @@ static int mtk_seninf_notifier_bound(struct v4l2_async_notifier *notifier,
 			return -EINVAL;
 		}
 
-		ret = v4l2_create_fwnode_links_to_pad(sd,
-						      &priv->pads[input->pad],
-						      MEDIA_LNK_FL_IMMUTABLE |
-						      MEDIA_LNK_FL_ENABLED);
+		/*
+		 * A single source keeps its immutable link. Of several, the
+		 * one on the first endpoint is linked when it binds and no
+		 * other source is linked, whatever order they bind in.
+		 */
+		state = v4l2_subdev_lock_and_get_active_state(&priv->subdev);
+		enable = !input->active && src == &input->sources[0];
+		flags = enable ? MEDIA_LNK_FL_ENABLED : 0;
+		if (input->num_sources == 1)
+			flags |= MEDIA_LNK_FL_IMMUTABLE;
 
-		source_pad = media_pad_remote_pad_unique(&priv->pads[input->pad]);
-		if (IS_ERR(source_pad)) {
-			dev_err(priv->dev, "No connected sensor pad\n");
-			return PTR_ERR(source_pad);
+		ret = v4l2_create_fwnode_links_to_pad(sd, sink, flags);
+
+		src->pad = NULL;
+		for_each_media_entity_data_link(&sd->entity, mlink) {
+			if (mlink->sink == sink) {
+				src->pad = mlink->source;
+				break;
+			}
 		}
+		if (!ret && !src->pad)
+			ret = -ENOLINK;
+		if (!ret) {
+			src->sd = sd;
+			if (enable)
+				mtk_seninf_input_activate(input, src);
+		}
+		v4l2_subdev_unlock_state(state);
 
-		input->source_pad = source_pad;
-		input->source_sd = sd;
+		if (ret == -ENOLINK) {
+			dev_err(priv->dev, "No connected sensor pad\n");
+			return ret;
+		}
 	} else {
 		link = device_link_add(sd->dev, priv->dev,
 				       DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS);
@@ -1381,7 +2338,42 @@ static int mtk_seninf_notifier_bound(struct v4l2_async_notifier *notifier,
 		return ret;
 	}
 
-	return 0;
+	/*
+	 * Register the device nodes of everything bound so far: a camera whose
+	 * chain is complete works even if another sensor in the graph never
+	 * binds (the notifier then never completes).
+	 */
+	ret = v4l2_device_register_subdev_nodes(&priv->v4l2_dev);
+	if (ret)
+		dev_err(priv->dev, "Failed to register subdev nodes: %d\n", ret);
+
+	return ret;
+}
+
+static void mtk_seninf_notifier_unbind(struct v4l2_async_notifier *notifier,
+				       struct v4l2_subdev *sd,
+				       struct v4l2_async_connection *asc)
+{
+	struct mtk_seninf *priv = container_of(notifier, struct mtk_seninf,
+					       notifier);
+	struct mtk_seninf_async_subdev *asd =
+		container_of(asc, struct mtk_seninf_async_subdev, asc);
+	struct v4l2_subdev_state *state;
+
+	if (!asd->input)
+		return;
+
+	/*
+	 * Forget the source, its subdev is about to be unregistered and its
+	 * link removed. An input left without a linked source links its first
+	 * source when that binds again, or the one user space enables.
+	 */
+	state = v4l2_subdev_lock_and_get_active_state(&priv->subdev);
+	asd->source->sd = NULL;
+	asd->source->pad = NULL;
+	if (asd->input->active == asd->source)
+		mtk_seninf_input_activate(asd->input, NULL);
+	v4l2_subdev_unlock_state(state);
 }
 
 static int mtk_seninf_notifier_complete(struct v4l2_async_notifier *notifier)
@@ -1402,6 +2394,7 @@ static int mtk_seninf_notifier_complete(struct v4l2_async_notifier *notifier)
 
 static const struct v4l2_async_notifier_operations mtk_seninf_async_ops = {
 	.bound = mtk_seninf_notifier_bound,
+	.unbind = mtk_seninf_notifier_unbind,
 	.complete = mtk_seninf_notifier_complete,
 };
 
@@ -1409,19 +2402,24 @@ static int mtk_seninf_v4l2_async_register(struct mtk_seninf *priv)
 {
 	const struct mtk_seninf_conf *conf = priv->conf;
 	struct device *dev = priv->dev;
-	unsigned int i;
+	unsigned int i, ep;
 	int ret;
 
 	v4l2_async_nf_init(&priv->notifier, &priv->v4l2_dev);
 
+	/* an input takes several sources (endpoints), an output one sink */
 	for (i = 0; i < conf->nb_inputs + conf->nb_outputs; ++i) {
-		ret = mtk_seninf_fwnode_parse(dev, i);
+		for (ep = 0; ep < SENINF_MAX_NUM_SOURCES; ep++) {
+			if (ep && mtk_seninf_pad_is_source(priv, i))
+				break;
 
-		if (ret) {
-			dev_err(dev,
-				"Failed to parse endpoint at port %u: %d\n",
-				i, ret);
-			goto err_clean_notififer;
+			ret = mtk_seninf_fwnode_parse(dev, i, ep);
+			if (ret) {
+				dev_err(dev,
+					"Failed to parse endpoint %u at port %u: %d\n",
+					ep, i, ret);
+				goto err_clean_notififer;
+			}
 		}
 	}
 
@@ -1521,6 +2519,27 @@ static int seninf_regs_show(struct seq_file *m, void *unused)
 		seq_puts(m, "not powered (only readable while streaming)\n");
 		return 0;
 	}
+	if (priv->conf->csi_phy_2_0) {
+		seninf_dump_range(m, priv, "top 0x000", 0x0, 0x80);
+		seninf_dump_range(m, priv, "cam mux 0x400", 0x400, 0x4b0);
+		seninf_dump_range(m, priv, "cam mux chk 0x500", 0x500, 0x5b0);
+		for (i = 0; i < 5; i++) {
+			u32 b = 0x1000 * i;
+
+			snprintf(name, sizeof(name), "seninf%u ctrl 0x%x", i + 1, b + 0x200);
+			seninf_dump_range(m, priv, name, b + 0x200, b + 0x230);
+			snprintf(name, sizeof(name), "seninf%u tm 0x%x", i + 1, b + 0x600);
+			seninf_dump_range(m, priv, name, b + 0x600, b + 0x624);
+			snprintf(name, sizeof(name), "seninf%u csi2 0x%x", i + 1, b + 0xa00);
+			seninf_dump_range(m, priv, name, b + 0xa00, b + 0xb00);
+		}
+		for (i = 0; i < 6; i++) {
+			snprintf(name, sizeof(name), "mux%u 0x%x", i, 0x1000 * i + 0xd00);
+			seninf_dump_range(m, priv, name, 0x1000 * i + 0xd00, 0x1000 * i + 0xd40);
+		}
+		pm_runtime_put(priv->dev);
+		return 0;
+	}
 	seninf_dump_range(m, priv, "top 0x000", 0x0, 0x30);
 	for (i = 0; i < 3; i++) {	/* SENINF1, SENINF2, SENINF3 blocks */
 		snprintf(name, sizeof(name), "seninf%u ctrl 0x%x", i + 1, 0x1000 * i + 0x200);
@@ -1539,7 +2558,6 @@ static int seninf_regs_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(seninf_regs);
 
-#ifdef CONFIG_PM
 static int seninf_pm_suspend(struct device *dev)
 {
 	struct mtk_seninf *priv = dev_get_drvdata(dev);
@@ -1560,16 +2578,50 @@ static int seninf_pm_resume(struct device *dev)
 		return ret;
 	}
 
-	mtk_seninf_csi2_setup_phy(priv);
+	if (!priv->conf->csi_phy_2_0)
+		mtk_seninf_csi2_setup_phy(priv);
 
 	return 0;
 }
-#endif
+
+static int seninf_prepare(struct device *dev)
+{
+	struct mtk_seninf *priv = dev_get_drvdata(dev);
+
+	priv->sleeping = true;
+
+	return 0;
+}
+
+/*
+ * A stream that did not start again after the sleep left its input without
+ * users and its lens held (see mtk_seninf_lens_set()): let the lens go.
+ */
+static void seninf_complete(struct device *dev)
+{
+	struct mtk_seninf *priv = dev_get_drvdata(dev);
+	struct v4l2_subdev_state *state;
+	unsigned int i;
+
+	priv->sleeping = false;
+
+	/* the subdev and its state exist from the probe on */
+	state = v4l2_subdev_lock_and_get_active_state(&priv->subdev);
+	for (i = 0; i < priv->conf->nb_inputs; i++) {
+		struct mtk_seninf_input *input = &priv->inputs[i];
+
+		if (!input->users && input->lens_active)
+			mtk_seninf_lens_set(input, false);
+	}
+	v4l2_subdev_unlock_state(state);
+}
 
 static const struct dev_pm_ops runtime_pm_ops = {
 	SET_RUNTIME_PM_OPS(seninf_pm_suspend, seninf_pm_resume, NULL)
 	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
 				pm_runtime_force_resume)
+	.prepare = pm_sleep_ptr(seninf_prepare),
+	.complete = pm_sleep_ptr(seninf_complete),
 };
 
 static int seninf_probe(struct platform_device *pdev)
@@ -1593,18 +2645,29 @@ static int seninf_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
-	priv->num_clks = ARRAY_SIZE(clk_names);
-	priv->clks = devm_kcalloc(dev, priv->num_clks,
-				  sizeof(*priv->clks), GFP_KERNEL);
-	if (!priv->clks)
-		return -ENOMEM;
+	if (priv->conf->csi_phy_2_0) {
+		/* camsys gate and the three topckgen seninf muxes, as the vendor kernel */
+		ret = devm_clk_bulk_get_all(dev, &priv->clks);
+		if (ret < 0)
+			return dev_err_probe(dev, ret, "Failed to get seninf clocks\n");
+		priv->num_clks = ret;
+		for (i = 0; i < priv->num_clks; ++i)
+			dev_info(dev, "clock %s: %lu Hz\n", priv->clks[i].id,
+				 clk_get_rate(priv->clks[i].clk));
+	} else {
+		priv->num_clks = ARRAY_SIZE(clk_names);
+		priv->clks = devm_kcalloc(dev, priv->num_clks,
+					  sizeof(*priv->clks), GFP_KERNEL);
+		if (!priv->clks)
+			return -ENOMEM;
 
-	for (i = 0; i < priv->num_clks; ++i)
-		priv->clks[i].id = clk_names[i];
+		for (i = 0; i < priv->num_clks; ++i)
+			priv->clks[i].id = clk_names[i];
 
-	ret = devm_clk_bulk_get(dev, priv->num_clks, priv->clks);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to get seninf clocks\n");
+		ret = devm_clk_bulk_get(dev, priv->num_clks, priv->clks);
+		if (ret)
+			return dev_err_probe(dev, ret, "Failed to get seninf clocks\n");
+	}
 
 	for (i = 0; i < priv->conf->nb_muxes; ++i) {
 		struct mtk_seninf_mux *mux = &priv->muxes[i];
@@ -1615,14 +2678,16 @@ static int seninf_probe(struct platform_device *pdev)
 		mux->seninf = priv;
 	}
 
-	devm_pm_runtime_enable(dev);
+	pm_runtime_enable(dev);
 
 	priv->dbg = debugfs_create_dir(dev_name(dev), NULL);
 	debugfs_create_file("regs", 0400, priv->dbg, priv, &seninf_regs_fops);
 
 	ret = mtk_seninf_v4l2_register(priv);
-	if (ret)
+	if (ret) {
 		debugfs_remove_recursive(priv->dbg);
+		pm_runtime_disable(dev);
+	}
 	return ret;
 }
 
@@ -1631,13 +2696,28 @@ static void seninf_remove(struct platform_device *pdev)
 	struct mtk_seninf *priv = dev_get_drvdata(&pdev->dev);
 
 	debugfs_remove_recursive(priv->dbg);
-	media_device_unregister(&priv->media_dev);
-	media_device_cleanup(&priv->media_dev);
+	/*
+	 * Unbind the sensors and CAMSVs while the media graph still exists:
+	 * a CAMSV that is still streaming stops the pipeline on unbind.
+	 */
 	v4l2_async_nf_unregister(&priv->notifier);
 	v4l2_async_nf_cleanup(&priv->notifier);
+	media_device_unregister(&priv->media_dev);
+	media_device_cleanup(&priv->media_dev);
 	v4l2_device_unregister_subdev(&priv->subdev);
 	seninf_subdev_cleanup(priv);
 	v4l2_device_unregister(&priv->v4l2_dev);
+
+	/*
+	 * Do not leave the clocks running when the device is still active
+	 * here: an enable count left behind keeps the camsys gate marked on
+	 * while the CAM domain loses its state, and the next bind finds the
+	 * SENINF unclocked.
+	 */
+	pm_runtime_disable(&pdev->dev);
+	if (!pm_runtime_status_suspended(&pdev->dev))
+		seninf_pm_suspend(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
 }
 
 static const struct mtk_seninf_conf seninf_8365_conf = {
@@ -1659,7 +2739,36 @@ static const struct mtk_seninf_conf seninf_8183_conf = {
 	.init_top_ctrl = true,
 };
 
+/*
+ * MT6785: default routes, the same with any set of connected sensors:
+ * CSI1 -> port 4 (CAMSV1), CSI2 -> port 5 (CAMSV2), CSI0 -> port 7 (CAMSV4).
+ * Port 6 (CAMSV3) has no default route: it takes a further stream (virtual
+ * channel) of an input, such as the phase detection data of a sensor on
+ * CSI2. CSI0B has no output left.
+ */
+static const u8 seninf_6785_default_routes[] = {
+	[CSI_PORT_0] = 7,
+	[CSI_PORT_1] = 4,
+	[CSI_PORT_2] = 5,
+	[CSI_PORT_0B] = 0,
+};
+
+/*
+ * MT6785: inputs as on MT8183 (DT ports 0..3 = CSI0, CSI1, CSI2, CSI0B ->
+ * SENINF1, 3, 5, 2), outputs DT ports 4..7 -> MUX0..3 -> CAM mux 2..5
+ * (CAMSV1..4).
+ */
+static const struct mtk_seninf_conf seninf_6785_conf = {
+	.model = "mtk-camsys-mt6785",
+	.nb_inputs = 4,
+	.nb_muxes = 6,
+	.nb_outputs = 4,
+	.default_routes = seninf_6785_default_routes,
+	.csi_phy_2_0 = true,
+};
+
 static const struct of_device_id mtk_seninf_of_match[] = {
+	{ .compatible = "mediatek,mt6785-seninf", .data = &seninf_6785_conf },
 	{ .compatible = "mediatek,mt8365-seninf", .data = &seninf_8365_conf },
 	{ .compatible = "mediatek,mt8183-seninf", .data = &seninf_8183_conf },
 	{ /* sentinel */ },
@@ -1677,6 +2786,10 @@ static struct platform_driver seninf_pdrv = {
 };
 
 module_platform_driver(seninf_pdrv);
+
+#if IS_ENABLED(CONFIG_MTK_SENINF30_KUNIT_TEST)
+#include "mtk_seninf_test.c"
+#endif
 
 MODULE_DESCRIPTION("MTK sensor interface driver");
 MODULE_AUTHOR("Louis Kuo <louis.kuo@mediatek.com>");
