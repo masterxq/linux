@@ -58,6 +58,17 @@ properties:
     minItems: 1
     maxItems: 3
 
+  mediatek,keep-boot-state:
+    type: boolean
+    description:
+      Take over the power state left by the bootloader instead of running
+      the power sequences at probe. Domains that are on stay on for good
+      (always-on) and hold their supply and clocks as their power-on
+      sequence would, domains that are off are registered as off and are
+      powered on by their first user. For devices whose bootloader keeps
+      hardware running that Linux does not drive yet, e.g. a boot splash
+      on the display pipeline.
+
 patternProperties:
   "^power-domain@[0-9a-f]+$":
     $ref: "#/$defs/power-domain-node"
