@@ -35,7 +35,7 @@ mtk_vdec_find_format(struct v4l2_format *f,
 
 static bool mtk_vdec_get_cap_fmt(struct mtk_vcodec_dec_ctx *ctx, int format_index)
 {
-	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->dev->vdec_pdata;
+	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->vdec_pdata;
 	const struct mtk_video_fmt *fmt;
 	struct mtk_q_data *q_data;
 	int num_frame_count = 0, i;
@@ -132,35 +132,15 @@ static int stateless_try_decoder_cmd(struct file *file, void *priv, struct v4l2_
 
 static int stateless_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd)
 {
-	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
-	int ret;
-
-	ret = v4l2_m2m_ioctl_stateless_try_decoder_cmd(file, priv, cmd);
-	if (ret)
-		return ret;
-
-	mtk_v4l2_vdec_dbg(3, ctx, "decoder cmd=%u", cmd->cmd);
-	switch (cmd->cmd) {
-	case V4L2_DEC_CMD_FLUSH:
-		/*
-		 * If the flag of the output buffer is equals V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF,
-		 * this command will prevent dequeueing the capture buffer containing the last
-		 * decoded frame. Or do nothing
-		 */
-		break;
-	default:
-		mtk_v4l2_vdec_err(ctx, "invalid stateless decoder cmd=%u", cmd->cmd);
-		return -EINVAL;
-	}
-
-	return 0;
+	/* V4L2_DEC_CMD_FLUSH: release a held capture buffer */
+	return v4l2_m2m_ioctl_stateless_decoder_cmd(file, priv, cmd);
 }
 
 static int vidioc_try_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd)
 {
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
 
-	if (ctx->dev->vdec_pdata->uses_stateless_api)
+	if (ctx->vdec_pdata->uses_stateless_api)
 		return stateless_try_decoder_cmd(file, priv, cmd);
 
 	return stateful_try_decoder_cmd(file, priv, cmd);
@@ -170,7 +150,7 @@ static int vidioc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder
 {
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
 
-	if (ctx->dev->vdec_pdata->uses_stateless_api)
+	if (ctx->vdec_pdata->uses_stateless_api)
 		return stateless_decoder_cmd(file, priv, cmd);
 
 	return stateful_decoder_cmd(file, priv, cmd);
@@ -199,7 +179,7 @@ void mtk_vcodec_dec_set_default_params(struct mtk_vcodec_dec_ctx *ctx)
 	ctx->m2m_ctx->q_lock = &ctx->dev->dev_mutex;
 	ctx->fh.m2m_ctx = ctx->m2m_ctx;
 	ctx->fh.ctrl_handler = &ctx->ctrl_hdl;
-	INIT_WORK(&ctx->decode_work, ctx->dev->vdec_pdata->worker);
+	INIT_WORK(&ctx->decode_work, ctx->vdec_pdata->worker);
 	ctx->colorspace = V4L2_COLORSPACE_REC709;
 	ctx->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
 	ctx->quantization = V4L2_QUANTIZATION_DEFAULT;
@@ -209,7 +189,7 @@ void mtk_vcodec_dec_set_default_params(struct mtk_vcodec_dec_ctx *ctx)
 	memset(q_data, 0, sizeof(struct mtk_q_data));
 	q_data->visible_width = DFT_CFG_WIDTH;
 	q_data->visible_height = DFT_CFG_HEIGHT;
-	q_data->fmt = ctx->dev->vdec_pdata->default_out_fmt;
+	q_data->fmt = ctx->vdec_pdata->default_out_fmt;
 	q_data->field = V4L2_FIELD_NONE;
 
 	q_data->sizeimage[0] = DFT_CFG_WIDTH * DFT_CFG_HEIGHT;
@@ -221,7 +201,7 @@ void mtk_vcodec_dec_set_default_params(struct mtk_vcodec_dec_ctx *ctx)
 	q_data->visible_height = DFT_CFG_HEIGHT;
 	q_data->coded_width = DFT_CFG_WIDTH;
 	q_data->coded_height = DFT_CFG_HEIGHT;
-	q_data->fmt = ctx->dev->vdec_pdata->default_cap_fmt;
+	q_data->fmt = ctx->vdec_pdata->default_cap_fmt;
 	q_data->field = V4L2_FIELD_NONE;
 
 	q_data->sizeimage[0] = q_data->coded_width * q_data->coded_height;
@@ -273,7 +253,7 @@ static int vidioc_vdec_subscribe_evt(struct v4l2_fh *fh,
 {
 	struct mtk_vcodec_dec_ctx *ctx = fh_to_dec_ctx(fh);
 
-	if (ctx->dev->vdec_pdata->uses_stateless_api)
+	if (ctx->vdec_pdata->uses_stateless_api)
 		return v4l2_ctrl_subscribe_event(fh, sub);
 
 	switch (sub->type) {
@@ -307,7 +287,17 @@ static int vidioc_try_fmt(struct mtk_vcodec_dec_ctx *ctx, struct v4l2_format *f,
 		pix_fmt_mp->num_planes = 1;
 		pix_fmt_mp->plane_fmt[0].bytesperline = 0;
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		unsigned int walign = 6, halign = 6;
 		int tmp_w, tmp_h;
+
+		/*
+		 * The tile rows of a decoder without firmware follow the
+		 * coded width: align to the 16x32 tiles of MM21 only.
+		 */
+		if (ctx->vdec_pdata->direct) {
+			walign = 4;
+			halign = 5;
+		}
 
 		/*
 		 * Find next closer width align 64, height align 64, size align
@@ -317,16 +307,16 @@ static int vidioc_try_fmt(struct mtk_vcodec_dec_ctx *ctx, struct v4l2_format *f,
 		 */
 		tmp_w = pix_fmt_mp->width;
 		tmp_h = pix_fmt_mp->height;
-		v4l_bound_align_image(&pix_fmt_mp->width, MTK_VDEC_MIN_W, frmsize->max_width, 6,
-				      &pix_fmt_mp->height, MTK_VDEC_MIN_H, frmsize->max_height, 6,
-				      9);
+		v4l_bound_align_image(&pix_fmt_mp->width, MTK_VDEC_MIN_W, frmsize->max_width,
+				      walign, &pix_fmt_mp->height, MTK_VDEC_MIN_H,
+				      frmsize->max_height, halign, 9);
 
 		if (pix_fmt_mp->width < tmp_w &&
-		    (pix_fmt_mp->width + 64) <= frmsize->max_width)
-			pix_fmt_mp->width += 64;
+		    (pix_fmt_mp->width + BIT(walign)) <= frmsize->max_width)
+			pix_fmt_mp->width += BIT(walign);
 		if (pix_fmt_mp->height < tmp_h &&
-		    (pix_fmt_mp->height + 64) <= frmsize->max_height)
-			pix_fmt_mp->height += 64;
+		    (pix_fmt_mp->height + BIT(halign)) <= frmsize->max_height)
+			pix_fmt_mp->height += BIT(halign);
 
 		mtk_v4l2_vdec_dbg(0, ctx,
 				  "before resize wxh=%dx%d, after resize wxh=%dx%d, sizeimage=%d",
@@ -344,6 +334,14 @@ static int vidioc_try_fmt(struct mtk_vcodec_dec_ctx *ctx, struct v4l2_format *f,
 			pix_fmt_mp->plane_fmt[1].bytesperline =
 				pix_fmt_mp->width;
 		}
+		if (fmt->fourcc == V4L2_PIX_FMT_MT2110T || fmt->fourcc == V4L2_PIX_FMT_MT2110R) {
+			pix_fmt_mp->plane_fmt[0].bytesperline = pix_fmt_mp->width * 5 / 4;
+			pix_fmt_mp->plane_fmt[0].sizeimage =
+				pix_fmt_mp->width * pix_fmt_mp->height * 5 / 4;
+			pix_fmt_mp->plane_fmt[1].bytesperline = pix_fmt_mp->width * 5 / 4;
+			pix_fmt_mp->plane_fmt[1].sizeimage =
+				pix_fmt_mp->width * pix_fmt_mp->height * 5 / 8;
+		}
 	}
 
 	pix_fmt_mp->flags = 0;
@@ -355,7 +353,7 @@ static int vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
 {
 	const struct mtk_video_fmt *fmt;
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
-	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->dev->vdec_pdata;
+	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->vdec_pdata;
 
 	fmt = mtk_vdec_find_format(f, dec_pdata);
 	if (!fmt) {
@@ -373,7 +371,7 @@ static int vidioc_try_fmt_vid_out_mplane(struct file *file, void *priv,
 	struct v4l2_pix_format_mplane *pix_fmt_mp = &f->fmt.pix_mp;
 	const struct mtk_video_fmt *fmt;
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
-	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->dev->vdec_pdata;
+	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->vdec_pdata;
 
 	fmt = mtk_vdec_find_format(f, dec_pdata);
 	if (!fmt) {
@@ -469,7 +467,7 @@ static int vidioc_vdec_s_fmt(struct file *file, void *priv,
 	struct mtk_q_data *q_data;
 	int ret = 0;
 	const struct mtk_video_fmt *fmt;
-	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->dev->vdec_pdata;
+	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->vdec_pdata;
 
 	mtk_v4l2_vdec_dbg(3, ctx, "[%d]", ctx->id);
 
@@ -491,10 +489,15 @@ static int vidioc_vdec_s_fmt(struct file *file, void *priv,
 
 	/*
 	 * Setting CAPTURE format after CAPTURE buffers are allocated is
-	 * invalid.
+	 * invalid, except for a new size on a stateless decoder without
+	 * firmware: buffers of the old size stay references, new ones are
+	 * added with VIDIOC_CREATE_BUFS, and each keeps the layout it was
+	 * queued with.
 	 */
 	if ((f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) &&
-	    vb2_is_busy(&ctx->m2m_ctx->cap_q_ctx.q)) {
+	    vb2_is_busy(&ctx->m2m_ctx->cap_q_ctx.q) &&
+	    !(dec_pdata->direct && dec_pdata->uses_stateless_api &&
+	      pix_mp->pixelformat == ctx->q_data[MTK_Q_DATA_DST].fmt->fourcc)) {
 		mtk_v4l2_vdec_err(ctx, "cap_q_ctx buffers already requested");
 		ret = -EBUSY;
 	}
@@ -577,6 +580,11 @@ static int vidioc_vdec_s_fmt(struct file *file, void *priv,
 				ctx->picinfo.buf_w;
 		}
 
+		if (ctx->q_data[MTK_Q_DATA_DST].fmt->fourcc == V4L2_PIX_FMT_MT2110T ||
+		    ctx->q_data[MTK_Q_DATA_DST].fmt->fourcc == V4L2_PIX_FMT_MT2110R) {
+			ctx->q_data[MTK_Q_DATA_DST].bytesperline[0] = ctx->picinfo.buf_w * 5 / 4;
+			ctx->q_data[MTK_Q_DATA_DST].bytesperline[1] = ctx->picinfo.buf_w * 5 / 4;
+		}
 		ctx->q_data[MTK_Q_DATA_DST].coded_width = ctx->picinfo.buf_w;
 		ctx->q_data[MTK_Q_DATA_DST].coded_height = ctx->picinfo.buf_h;
 		mtk_v4l2_vdec_dbg(2, ctx,
@@ -595,7 +603,7 @@ static int vidioc_enum_framesizes(struct file *file, void *priv,
 {
 	int i = 0;
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
-	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->dev->vdec_pdata;
+	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->vdec_pdata;
 
 	if (fsize->index != 0)
 		return -EINVAL;
@@ -627,7 +635,7 @@ static int vidioc_enum_fmt(struct file *file, struct v4l2_fmtdesc *f,
 			   bool output_queue)
 {
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
-	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->dev->vdec_pdata;
+	const struct mtk_vcodec_dec_pdata *dec_pdata = ctx->vdec_pdata;
 	const struct mtk_video_fmt *fmt;
 	int i, j = 0;
 
@@ -696,6 +704,11 @@ static int vidioc_vdec_g_fmt(struct file *file, void *priv,
 		q_data->sizeimage[1] = ctx->picinfo.fb_sz[1];
 		q_data->bytesperline[0] = ctx->last_decoded_picinfo.buf_w;
 		q_data->bytesperline[1] = ctx->last_decoded_picinfo.buf_w;
+		if (q_data->fmt->fourcc == V4L2_PIX_FMT_MT2110T ||
+		    q_data->fmt->fourcc == V4L2_PIX_FMT_MT2110R) {
+			q_data->bytesperline[0] = ctx->last_decoded_picinfo.buf_w * 5 / 4;
+			q_data->bytesperline[1] = ctx->last_decoded_picinfo.buf_w * 5 / 4;
+		}
 		q_data->coded_width = ctx->picinfo.buf_w;
 		q_data->coded_height = ctx->picinfo.buf_h;
 		ctx->last_decoded_picinfo.cap_fourcc = q_data->fmt->fourcc;
@@ -797,6 +810,8 @@ int vb2ops_vdec_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
 int vb2ops_vdec_buf_prepare(struct vb2_buffer *vb)
 {
 	struct mtk_vcodec_dec_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
+	struct vb2_v4l2_buffer *vb2_v4l2 = to_vb2_v4l2_buffer(vb);
+	struct mtk_video_dec_buf *buf;
 	struct mtk_q_data *q_data;
 	int i;
 
@@ -813,6 +828,15 @@ int vb2ops_vdec_buf_prepare(struct vb2_buffer *vb)
 		}
 		if (!V4L2_TYPE_IS_OUTPUT(vb->type))
 			vb2_set_plane_payload(vb, i, q_data->sizeimage[i]);
+	}
+
+	/* the capture layout this buffer is filled with, and no picture yet */
+	if (!V4L2_TYPE_IS_OUTPUT(vb->type)) {
+		buf = container_of(vb2_v4l2, struct mtk_video_dec_buf, m2m_buf.vb);
+		buf->frame_buffer.buf_w = q_data->coded_width;
+		buf->frame_buffer.buf_h = q_data->coded_height;
+		buf->frame_buffer.pic_w = 0;
+		buf->frame_buffer.pic_h = 0;
 	}
 
 	return 0;
@@ -909,7 +933,7 @@ void vb2ops_vdec_stop_streaming(struct vb2_queue *q)
 				  ctx->last_decoded_picinfo.buf_w,
 				  ctx->last_decoded_picinfo.buf_h);
 
-		ret = ctx->dev->vdec_pdata->flush_decoder(ctx);
+		ret = ctx->vdec_pdata->flush_decoder(ctx);
 		if (ret)
 			mtk_v4l2_vdec_err(ctx, "DecodeFinal failed, ret=%d", ret);
 	}
@@ -964,6 +988,21 @@ const struct v4l2_m2m_ops mtk_vdec_m2m_ops = {
 	.job_abort	= m2mops_vdec_job_abort,
 };
 
+static int vidioc_vdec_remove_bufs(struct file *file, void *priv,
+				   struct v4l2_remove_buffers *d)
+{
+	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
+
+	/*
+	 * A capture buffer may be the reference of a decode that is already
+	 * running or scheduled: let it finish before the buffer goes away.
+	 */
+	if (V4L2_TYPE_IS_CAPTURE(d->type))
+		flush_work(&ctx->decode_work);
+
+	return v4l2_m2m_ioctl_remove_bufs(file, priv, d);
+}
+
 const struct v4l2_ioctl_ops mtk_vdec_ioctl_ops = {
 	.vidioc_streamon	= v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff	= v4l2_m2m_ioctl_streamoff,
@@ -983,6 +1022,8 @@ const struct v4l2_ioctl_ops mtk_vdec_ioctl_ops = {
 	.vidioc_g_fmt_vid_out_mplane	= vidioc_vdec_g_fmt,
 
 	.vidioc_create_bufs		= v4l2_m2m_ioctl_create_bufs,
+	/* only offered by stateless decoders without firmware */
+	.vidioc_remove_bufs		= vidioc_vdec_remove_bufs,
 
 	.vidioc_enum_fmt_vid_cap	= vidioc_vdec_enum_fmt_vid_cap,
 	.vidioc_enum_fmt_vid_out	= vidioc_vdec_enum_fmt_vid_out,
@@ -1010,12 +1051,18 @@ int mtk_vcodec_dec_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->io_modes	= VB2_DMABUF | VB2_MMAP;
 	src_vq->drv_priv	= ctx;
 	src_vq->buf_struct_size = sizeof(struct mtk_video_dec_buf);
-	src_vq->ops		= ctx->dev->vdec_pdata->vdec_vb2_ops;
+	src_vq->ops		= ctx->vdec_pdata->vdec_vb2_ops;
 	src_vq->mem_ops		= &vb2_dma_contig_memops;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	src_vq->lock		= &ctx->dev->dev_mutex;
 	src_vq->dev             = &ctx->dev->plat_dev->dev;
 	src_vq->allow_cache_hints = 1;
+	/*
+	 * Decoders without firmware decode the two fields of a frame one
+	 * after the other into the same capture buffer.
+	 */
+	if (ctx->vdec_pdata->direct && ctx->vdec_pdata->uses_stateless_api)
+		src_vq->subsystem_flags |= VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF;
 
 	ret = vb2_queue_init(src_vq);
 	if (ret) {
@@ -1026,12 +1073,14 @@ int mtk_vcodec_dec_queue_init(void *priv, struct vb2_queue *src_vq,
 	dst_vq->io_modes	= VB2_DMABUF | VB2_MMAP;
 	dst_vq->drv_priv	= ctx;
 	dst_vq->buf_struct_size = sizeof(struct mtk_video_dec_buf);
-	dst_vq->ops		= ctx->dev->vdec_pdata->vdec_vb2_ops;
+	dst_vq->ops		= ctx->vdec_pdata->vdec_vb2_ops;
 	dst_vq->mem_ops		= &vb2_dma_contig_memops;
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	dst_vq->lock		= &ctx->dev->dev_mutex;
 	dst_vq->dev             = &ctx->dev->plat_dev->dev;
 	dst_vq->allow_cache_hints = 1;
+	if (ctx->vdec_pdata->direct && ctx->vdec_pdata->uses_stateless_api)
+		dst_vq->max_num_buffers = MTK_VDEC_DIRECT_MAX_CAPTURE;
 
 	ret = vb2_queue_init(dst_vq);
 	if (ret)

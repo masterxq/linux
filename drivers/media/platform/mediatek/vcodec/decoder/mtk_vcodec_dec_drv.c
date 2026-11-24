@@ -162,7 +162,10 @@ static int mtk_vcodec_init_dec_resources(struct mtk_vcodec_dec_dev *dev)
 	struct platform_device *pdev = dev->plat_dev;
 	int ret;
 
-	ret = mtk_vcodec_get_reg_bases(dev);
+	if (dev->vdec_pdata->direct)
+		ret = mtk_vdec_direct_init(dev);
+	else
+		ret = mtk_vcodec_get_reg_bases(dev);
 	if (ret)
 		return ret;
 
@@ -210,6 +213,9 @@ static int fops_vcodec_open(struct file *file)
 	v4l2_fh_add(&ctx->fh, file);
 	INIT_LIST_HEAD(&ctx->list);
 	ctx->dev = dev;
+	ctx->vdec_pdata = dev->vdec_pdata;
+	if (dev->vfd_dec_stateful && video_devdata(file) == dev->vfd_dec_stateful)
+		ctx->vdec_pdata = dev->vdec_pdata->direct->stateful;
 	if (ctx->dev->vdec_pdata->is_subdev_supported) {
 		hw_count = mtk_vcodec_get_hw_count(ctx, dev);
 		if (!hw_count || !dev->subdev_prob_done) {
@@ -229,12 +235,13 @@ static int fops_vcodec_open(struct file *file)
 	mutex_init(&ctx->lock);
 
 	ctx->type = MTK_INST_DECODER;
-	ret = dev->vdec_pdata->ctrls_setup(ctx);
+	ret = ctx->vdec_pdata->ctrls_setup(ctx);
 	if (ret) {
 		mtk_v4l2_vdec_err(ctx, "Failed to setup mt vcodec controls");
 		goto err_ctrls_setup;
 	}
-	ctx->m2m_ctx = v4l2_m2m_ctx_init(dev->m2m_dev_dec, ctx,
+	ctx->m2m_ctx = v4l2_m2m_ctx_init(ctx->vdec_pdata->uses_stateless_api ?
+					 dev->m2m_dev_dec : dev->m2m_dev_dec_stateful, ctx,
 		&mtk_vcodec_dec_queue_init);
 	if (IS_ERR((__force void *)ctx->m2m_ctx)) {
 		ret = PTR_ERR((__force void *)ctx->m2m_ctx);
@@ -246,7 +253,9 @@ static int fops_vcodec_open(struct file *file)
 	ctx->empty_flush_buf.vb.vb2_buf.vb2_queue = src_vq;
 	mtk_vcodec_dec_set_default_params(ctx);
 
-	if (v4l2_fh_is_singular(&ctx->fh)) {
+	if (dev->vdec_pdata->direct) {
+		dev->dec_capability = dev->vdec_pdata->direct->capability;
+	} else if (v4l2_fh_is_singular(&ctx->fh)) {
 		/*
 		 * Does nothing if firmware was already loaded.
 		 */
@@ -266,7 +275,7 @@ static int fops_vcodec_open(struct file *file)
 		mtk_v4l2_vdec_dbg(0, ctx, "decoder capability %x", dev->dec_capability);
 	}
 
-	ctx->dev->vdec_pdata->init_vdec_params(ctx);
+	ctx->vdec_pdata->init_vdec_params(ctx);
 
 	spin_lock_irqsave(&dev->dev_ctx_lock, flags);
 	list_add(&ctx->list, &dev->ctx_list);
@@ -335,7 +344,9 @@ static void mtk_vcodec_dec_get_chip_name(struct mtk_vcodec_dec_dev *vdec_dev)
 {
 	struct device *dev = &vdec_dev->plat_dev->dev;
 
-	if (of_device_is_compatible(dev->of_node, "mediatek,mt8173-vcodec-dec"))
+	if (of_device_is_compatible(dev->of_node, "mediatek,mt6785-vcodec-dec"))
+		vdec_dev->chip_name = MTK_VDEC_MT6785;
+	else if (of_device_is_compatible(dev->of_node, "mediatek,mt8173-vcodec-dec"))
 		vdec_dev->chip_name = MTK_VDEC_MT8173;
 	else if (of_device_is_compatible(dev->of_node, "mediatek,mt8183-vcodec-dec"))
 		vdec_dev->chip_name = MTK_VDEC_MT8183;
@@ -349,6 +360,77 @@ static void mtk_vcodec_dec_get_chip_name(struct mtk_vcodec_dec_dev *vdec_dev)
 		vdec_dev->chip_name = MTK_VDEC_MT8188;
 	else
 		vdec_dev->chip_name = MTK_VDEC_INVAL;
+}
+
+/*
+ * Decoders without firmware can offer formats without stateless controls
+ * (MPEG-4 Part 2, H.263) through a second video device with the stateful
+ * decoder interface. Both devices share the hardware and the mem2mem job
+ * queue.
+ */
+static int mtk_vcodec_dec_register_stateful(struct mtk_vcodec_dec_dev *dev)
+{
+	struct video_device *vfd;
+	int ret;
+
+	dev->m2m_dev_dec_stateful = v4l2_m2m_init(&mtk_vdec_m2m_ops);
+	if (IS_ERR(dev->m2m_dev_dec_stateful)) {
+		ret = PTR_ERR(dev->m2m_dev_dec_stateful);
+		dev->m2m_dev_dec_stateful = NULL;
+		return ret;
+	}
+
+	vfd = video_device_alloc();
+	if (!vfd) {
+		ret = -ENOMEM;
+		goto err_m2m;
+	}
+	vfd->fops = &mtk_vcodec_fops;
+	vfd->ioctl_ops = &mtk_vdec_ioctl_ops;
+	vfd->release = video_device_release;
+	vfd->lock = &dev->dev_mutex;
+	vfd->v4l2_dev = &dev->v4l2_dev;
+	vfd->vfl_dir = VFL_DIR_M2M;
+	vfd->device_caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING;
+	snprintf(vfd->name, sizeof(vfd->name), "%s-stateful", MTK_VCODEC_DEC_NAME);
+	video_set_drvdata(vfd, dev);
+	v4l2_disable_ioctl(vfd, VIDIOC_REMOVE_BUFS);
+
+	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
+	if (ret) {
+		video_device_release(vfd);
+		goto err_m2m;
+	}
+	dev->vfd_dec_stateful = vfd;
+
+	if (dev->v4l2_dev.mdev) {
+		ret = v4l2_m2m_register_media_controller(dev->m2m_dev_dec_stateful, vfd,
+							 MEDIA_ENT_F_PROC_VIDEO_DECODER);
+		if (ret)
+			goto err_vfd;
+	}
+	dev_dbg(&dev->plat_dev->dev, "stateful decoder registered as /dev/video%d",
+		vfd->minor);
+
+	return 0;
+
+err_vfd:
+	video_unregister_device(vfd);
+	dev->vfd_dec_stateful = NULL;
+err_m2m:
+	v4l2_m2m_release(dev->m2m_dev_dec_stateful);
+	dev->m2m_dev_dec_stateful = NULL;
+	return ret;
+}
+
+static void mtk_vcodec_dec_unregister_stateful(struct mtk_vcodec_dec_dev *dev)
+{
+	if (!dev->vfd_dec_stateful)
+		return;
+	if (dev->v4l2_dev.mdev)
+		v4l2_m2m_unregister_media_controller(dev->m2m_dev_dec_stateful);
+	video_unregister_device(dev->vfd_dec_stateful);
+	v4l2_m2m_release(dev->m2m_dev_dec_stateful);
 }
 
 static int mtk_vcodec_probe(struct platform_device *pdev)
@@ -373,21 +455,24 @@ static int mtk_vcodec_probe(struct platform_device *pdev)
 	}
 
 	dev->vdec_pdata = of_device_get_match_data(&pdev->dev);
-	if (!of_property_read_u32(pdev->dev.of_node, "mediatek,vpu",
-				  &rproc_phandle)) {
-		fw_type = VPU;
-	} else if (!of_property_read_u32(pdev->dev.of_node, "mediatek,scp",
-					 &rproc_phandle)) {
-		fw_type = SCP;
-	} else {
-		dev_dbg(&pdev->dev, "Could not get vdec IPI device");
-		return -ENODEV;
+	/* a decoder that the host programs needs no firmware */
+	if (!dev->vdec_pdata->direct) {
+		if (!of_property_read_u32(pdev->dev.of_node, "mediatek,vpu",
+					  &rproc_phandle)) {
+			fw_type = VPU;
+		} else if (!of_property_read_u32(pdev->dev.of_node, "mediatek,scp",
+						 &rproc_phandle)) {
+			fw_type = SCP;
+		} else {
+			dev_dbg(&pdev->dev, "Could not get vdec IPI device");
+			return -ENODEV;
+		}
+
+		dev->fw_handler = mtk_vcodec_fw_select(dev, fw_type, DECODER);
+		if (IS_ERR(dev->fw_handler))
+			return PTR_ERR(dev->fw_handler);
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
-
-	dev->fw_handler = mtk_vcodec_fw_select(dev, fw_type, DECODER);
-	if (IS_ERR(dev->fw_handler))
-		return PTR_ERR(dev->fw_handler);
 
 	ret = mtk_vcodec_init_dec_resources(dev);
 	if (ret) {
@@ -439,6 +524,13 @@ static int mtk_vcodec_probe(struct platform_device *pdev)
 	snprintf(vfd_dec->name, sizeof(vfd_dec->name), "%s",
 		MTK_VCODEC_DEC_NAME);
 	video_set_drvdata(vfd_dec, dev);
+	/*
+	 * Removing single capture buffers lets user space change the frame
+	 * size without stopping the queues; only decoders without firmware
+	 * keep the layout of each capture buffer.
+	 */
+	if (!dev->vdec_pdata->direct || !dev->vdec_pdata->uses_stateless_api)
+		v4l2_disable_ioctl(vfd_dec, VIDIOC_REMOVE_BUFS);
 	dev->vfd_dec = vfd_dec;
 	platform_set_drvdata(pdev, dev);
 
@@ -507,13 +599,23 @@ static int mtk_vcodec_probe(struct platform_device *pdev)
 		dev_dbg(&pdev->dev, "media registered as /dev/media%d", vfd_dec->minor);
 	}
 
+	if (dev->vdec_pdata->direct && dev->vdec_pdata->direct->stateful) {
+		ret = mtk_vcodec_dec_register_stateful(dev);
+		if (ret)
+			goto err_stateful;
+	}
+
 	mtk_vcodec_dbgfs_init(dev, false);
 	dev_dbg(&pdev->dev, "decoder registered as /dev/video%d", vfd_dec->minor);
 
 	return 0;
 
+err_stateful:
+	if (dev->vdec_pdata->uses_stateless_api)
+		media_device_unregister(&dev->mdev_dec);
 err_media_reg:
-	v4l2_m2m_unregister_media_controller(dev->m2m_dev_dec);
+	if (dev->vdec_pdata->uses_stateless_api)
+		v4l2_m2m_unregister_media_controller(dev->m2m_dev_dec);
 err_dec_mem_init:
 	video_unregister_device(vfd_dec);
 err_reg_cont:
@@ -531,11 +633,16 @@ err_res:
 	if (!dev->vdec_pdata->is_subdev_supported)
 		pm_runtime_disable(dev->pm.dev);
 err_dec_pm:
-	mtk_vcodec_fw_release(dev->fw_handler);
+	if (dev->fw_handler)
+		mtk_vcodec_fw_release(dev->fw_handler);
 	return ret;
 }
 
 static const struct of_device_id mtk_vcodec_match[] = {
+	{
+		.compatible = "mediatek,mt6785-vcodec-dec",
+		.data = &mtk_vdec_mt6785_pdata,
+	},
 	{
 		.compatible = "mediatek,mt8173-vcodec-dec",
 		.data = &mtk_vdec_8173_pdata,
@@ -582,6 +689,8 @@ static void mtk_vcodec_dec_remove(struct platform_device *pdev)
 	if (dev->m2m_dev_dec)
 		v4l2_m2m_release(dev->m2m_dev_dec);
 
+	mtk_vcodec_dec_unregister_stateful(dev);
+
 	if (dev->vfd_dec)
 		video_unregister_device(dev->vfd_dec);
 
@@ -589,7 +698,8 @@ static void mtk_vcodec_dec_remove(struct platform_device *pdev)
 	v4l2_device_unregister(&dev->v4l2_dev);
 	if (!dev->vdec_pdata->is_subdev_supported)
 		pm_runtime_disable(dev->pm.dev);
-	mtk_vcodec_fw_release(dev->fw_handler);
+	if (dev->fw_handler)
+		mtk_vcodec_fw_release(dev->fw_handler);
 }
 
 static struct platform_driver mtk_vcodec_dec_driver = {

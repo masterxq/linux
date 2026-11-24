@@ -276,24 +276,23 @@ static void mtk_vdec_worker(struct work_struct *work)
 {
 	struct mtk_vcodec_dec_ctx *ctx =
 		container_of(work, struct mtk_vcodec_dec_ctx, decode_work);
-	struct mtk_vcodec_dec_dev *dev = ctx->dev;
 	struct vb2_v4l2_buffer *src_buf, *dst_buf;
 	struct mtk_vcodec_mem buf;
 	struct vdec_fb *pfb;
-	bool res_chg = false;
+	bool res_chg = false, more;
 	int ret;
 	struct mtk_video_dec_buf *dst_buf_info, *src_buf_info;
 
 	src_buf = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
 	if (!src_buf) {
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
+		v4l2_m2m_job_finish(ctx->m2m_ctx->m2m_dev, ctx->m2m_ctx);
 		mtk_v4l2_vdec_dbg(1, ctx, "[%d] src_buf empty!!", ctx->id);
 		return;
 	}
 
 	dst_buf = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
 	if (!dst_buf) {
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
+		v4l2_m2m_job_finish(ctx->m2m_ctx->m2m_dev, ctx->m2m_ctx);
 		mtk_v4l2_vdec_dbg(1, ctx, "[%d] dst_buf empty!!", ctx->id);
 		return;
 	}
@@ -337,7 +336,7 @@ static void mtk_vdec_worker(struct work_struct *work)
 		dst_buf->flags |= V4L2_BUF_FLAG_LAST;
 		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_DONE);
 		clean_free_buffer(ctx);
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
+		v4l2_m2m_job_finish(ctx->m2m_ctx->m2m_dev, ctx->m2m_ctx);
 		return;
 	}
 
@@ -348,7 +347,7 @@ static void mtk_vdec_worker(struct work_struct *work)
 	buf.dma_addr = vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
 	buf.size = (size_t)src_buf->vb2_buf.planes[0].bytesused;
 	if (!buf.va) {
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
+		v4l2_m2m_job_finish(ctx->m2m_ctx->m2m_dev, ctx->m2m_ctx);
 		mtk_v4l2_vdec_err(ctx, "[%d] id=%d src_addr is NULL!!", ctx->id,
 				  src_buf->vb2_buf.index);
 		return;
@@ -363,6 +362,10 @@ static void mtk_vdec_worker(struct work_struct *work)
 	src_buf_info->used = true;
 
 	ret = vdec_if_decode(ctx, &buf, pfb, &res_chg);
+	/* -EAGAIN: a picture was decoded, the buffer holds more of them */
+	more = ret == -EAGAIN;
+	if (more)
+		ret = 0;
 
 	if (ret) {
 		mtk_v4l2_vdec_err(ctx,
@@ -376,7 +379,7 @@ static void mtk_vdec_worker(struct work_struct *work)
 			mutex_unlock(&ctx->lock);
 		}
 		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-	} else if (!res_chg) {
+	} else if (!res_chg && !more) {
 		/*
 		 * we only return src buffer with VB2_BUF_STATE_DONE
 		 * when decode success without resolution change
@@ -407,7 +410,7 @@ static void mtk_vdec_worker(struct work_struct *work)
 		 */
 		mtk_vdec_queue_res_chg_event(ctx);
 	}
-	v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
+	v4l2_m2m_job_finish(ctx->m2m_ctx->m2m_dev, ctx->m2m_ctx);
 }
 
 static void vb2ops_vdec_stateful_buf_queue(struct vb2_buffer *vb)
@@ -618,4 +621,80 @@ const struct mtk_vcodec_dec_pdata mtk_vdec_8173_pdata = {
 	.flush_decoder = mtk_vdec_flush_decoder,
 	.is_subdev_supported = false,
 	.hw_arch = MTK_VDEC_PURE_SINGLE_CORE,
+};
+
+/*
+ * Stateful formats of the decoders without firmware: the codec parses the
+ * stream headers in the kernel and the decoder writes MM21.
+ */
+static struct mtk_video_fmt mtk_direct_stateful_formats[] = {
+	{
+		.fourcc = V4L2_PIX_FMT_MPEG4,
+		.type = MTK_FMT_DEC,
+		.num_planes = 1,
+		.flags = V4L2_FMT_FLAG_DYN_RESOLUTION,
+		.frmsize = { MTK_VDEC_MIN_W, 1920, 1, MTK_VDEC_MIN_H, 1088, 1 },
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_XVID,
+		.type = MTK_FMT_DEC,
+		.num_planes = 1,
+		.flags = V4L2_FMT_FLAG_DYN_RESOLUTION,
+		.frmsize = { MTK_VDEC_MIN_W, 1920, 1, MTK_VDEC_MIN_H, 1088, 1 },
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_H263,
+		.type = MTK_FMT_DEC,
+		.num_planes = 1,
+		.flags = V4L2_FMT_FLAG_DYN_RESOLUTION,
+		.frmsize = { MTK_VDEC_MIN_W, 1408, 1, MTK_VDEC_MIN_H, 1152, 1 },
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_MM21,
+		.type = MTK_FMT_FRAME,
+		.num_planes = 2,
+	},
+};
+
+static const int mtk_direct_stateful_num_formats = ARRAY_SIZE(mtk_direct_stateful_formats);
+
+static int mtk_vcodec_dec_direct_ctrls_setup(struct mtk_vcodec_dec_ctx *ctx)
+{
+	struct v4l2_ctrl *ctrl;
+
+	/*
+	 * No profile control: user space would then insist on a profile in the
+	 * stream caps, which MPEG-4 streams without a visual object sequence
+	 * header do not have.
+	 */
+	v4l2_ctrl_handler_init(&ctx->ctrl_hdl, 1);
+	ctrl = v4l2_ctrl_new_std(&ctx->ctrl_hdl, &mtk_vcodec_dec_ctrl_ops,
+				 V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, 0, 32, 1, 1);
+	if (ctrl)
+		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
+	if (ctx->ctrl_hdl.error) {
+		mtk_v4l2_vdec_err(ctx, "Adding control failed %d", ctx->ctrl_hdl.error);
+		return ctx->ctrl_hdl.error;
+	}
+
+	return v4l2_ctrl_handler_setup(&ctx->ctrl_hdl);
+}
+
+static void mtk_vcodec_dec_direct_init_params(struct mtk_vcodec_dec_ctx *ctx)
+{
+}
+
+const struct mtk_vcodec_dec_pdata mtk_vdec_direct_stateful_pdata = {
+	.init_vdec_params = mtk_vcodec_dec_direct_init_params,
+	.ctrls_setup = mtk_vcodec_dec_direct_ctrls_setup,
+	.vdec_vb2_ops = &mtk_vdec_frame_vb2_ops,
+	.vdec_formats = mtk_direct_stateful_formats,
+	.num_formats = &mtk_direct_stateful_num_formats,
+	.default_out_fmt = &mtk_direct_stateful_formats[0],
+	.default_cap_fmt = &mtk_direct_stateful_formats[3],
+	.worker = mtk_vdec_worker,
+	.flush_decoder = mtk_vdec_flush_decoder,
+	.is_subdev_supported = false,
+	.hw_arch = MTK_VDEC_PURE_SINGLE_CORE,
+	.direct = &mtk_vdec_mt6785_direct_data,
 };

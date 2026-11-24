@@ -100,6 +100,24 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 	},
 	{
 		.cfg = {
+			.id = V4L2_CID_STATELESS_MPEG2_SEQUENCE,
+		},
+		.codec_type = V4L2_PIX_FMT_MPEG2_SLICE,
+	},
+	{
+		.cfg = {
+			.id = V4L2_CID_STATELESS_MPEG2_PICTURE,
+		},
+		.codec_type = V4L2_PIX_FMT_MPEG2_SLICE,
+	},
+	{
+		.cfg = {
+			.id = V4L2_CID_STATELESS_MPEG2_QUANTISATION,
+		},
+		.codec_type = V4L2_PIX_FMT_MPEG2_SLICE,
+	},
+	{
+		.cfg = {
 			.id = V4L2_CID_STATELESS_VP9_FRAME,
 		},
 		.codec_type = V4L2_PIX_FMT_VP9_FRAME,
@@ -227,7 +245,7 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 
 #define NUM_CTRLS ARRAY_SIZE(mtk_stateless_controls)
 
-static struct mtk_video_fmt mtk_video_formats[9];
+static struct mtk_video_fmt mtk_video_formats[10];
 
 static struct mtk_video_fmt default_out_format;
 static struct mtk_video_fmt default_cap_format;
@@ -388,6 +406,19 @@ static void mtk_vdec_worker(struct work_struct *work)
 	}
 
 	v4l2_ctrl_request_complete(mreq, &ctx->ctrl_hdl);
+
+	/*
+	 * Decoders without firmware let user space hold the capture buffer
+	 * for the second field of a frame: the m2m core returns or holds it,
+	 * returns the output buffer and ends the job.
+	 */
+	if (dev->vdec_pdata->direct) {
+		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx, buf_state);
+		kref_put(&req->refcount, mtk_vcodec_dec_request_release);
+		kref_put(&req->refcount, mtk_vcodec_dec_request_release);
+		return;
+	}
+
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
 	v4l2_m2m_buf_done(vb2_v4l2_src, buf_state);
 
@@ -572,6 +603,9 @@ static void mtk_vcodec_dec_fill_h264_level(struct v4l2_ctrl_config *cfg,
 					   struct mtk_vcodec_dec_ctx *ctx)
 {
 	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT6785:
+		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_5_1;
+		break;
 	case MTK_VDEC_MT8192:
 	case MTK_VDEC_MT8188:
 		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_5_2;
@@ -607,6 +641,7 @@ static void mtk_vcodec_dec_fill_h265_level(struct v4l2_ctrl_config *cfg,
 					   struct mtk_vcodec_dec_ctx *ctx)
 {
 	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT6785:
 	case MTK_VDEC_MT8188:
 		cfg->max = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1;
 		break;
@@ -623,6 +658,7 @@ static void mtk_vcodec_dec_fill_h265_profile(struct v4l2_ctrl_config *cfg,
 					     struct mtk_vcodec_dec_ctx *ctx)
 {
 	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT6785:
 	case MTK_VDEC_MT8188:
 	case MTK_VDEC_MT8195:
 		cfg->max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10;
@@ -637,6 +673,7 @@ static void mtk_vcodec_dec_fill_vp9_level(struct v4l2_ctrl_config *cfg,
 					  struct mtk_vcodec_dec_ctx *ctx)
 {
 	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT6785:
 	case MTK_VDEC_MT8192:
 	case MTK_VDEC_MT8188:
 		cfg->max = V4L2_MPEG_VIDEO_VP9_LEVEL_5_1;
@@ -657,6 +694,7 @@ static void mtk_vcodec_dec_fill_vp9_profile(struct v4l2_ctrl_config *cfg,
 					    struct mtk_vcodec_dec_ctx *ctx)
 {
 	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT6785:
 	case MTK_VDEC_MT8188:
 	case MTK_VDEC_MT8195:
 		cfg->max = V4L2_MPEG_VIDEO_VP9_PROFILE_2;
@@ -796,6 +834,7 @@ static void mtk_vcodec_add_formats(unsigned int fourcc,
 	case V4L2_PIX_FMT_VP9_FRAME:
 	case V4L2_PIX_FMT_HEVC_SLICE:
 	case V4L2_PIX_FMT_AV1_FRAME:
+	case V4L2_PIX_FMT_MPEG2_SLICE:
 		mtk_video_formats[count_formats].fourcc = fourcc;
 		mtk_video_formats[count_formats].type = MTK_FMT_DEC;
 		mtk_video_formats[count_formats].num_planes = 1;
@@ -807,6 +846,12 @@ static void mtk_vcodec_add_formats(unsigned int fourcc,
 				VCODEC_DEC_4K_CODED_WIDTH;
 			mtk_video_formats[count_formats].frmsize.max_height =
 				VCODEC_DEC_4K_CODED_HEIGHT;
+		}
+		if (pdata->direct) {
+			mtk_video_formats[count_formats].frmsize.max_width =
+				pdata->direct->max_width;
+			mtk_video_formats[count_formats].frmsize.max_height =
+				pdata->direct->max_height;
 		}
 		break;
 	case V4L2_PIX_FMT_MM21:
@@ -847,6 +892,11 @@ static void mtk_vcodec_get_supported_formats(struct mtk_vcodec_dec_ctx *ctx)
 	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_MM21) {
 		mtk_vcodec_add_formats(V4L2_PIX_FMT_MM21, ctx);
 		cap_format_count++;
+	}
+	/* first, so that the last added format stays the default */
+	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_MPEG2_SLICE) {
+		mtk_vcodec_add_formats(V4L2_PIX_FMT_MPEG2_SLICE, ctx);
+		out_format_count++;
 	}
 	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_H264_SLICE) {
 		mtk_vcodec_add_formats(V4L2_PIX_FMT_H264_SLICE, ctx);
@@ -929,6 +979,25 @@ const struct mtk_vcodec_dec_pdata mtk_vdec_8183_pdata = {
 	.get_cap_buffer = vdec_get_cap_buffer,
 	.is_subdev_supported = false,
 	.hw_arch = MTK_VDEC_PURE_SINGLE_CORE,
+};
+
+/* Decoder without firmware: the host programs its registers. */
+const struct mtk_vcodec_dec_pdata mtk_vdec_mt6785_pdata = {
+	.init_vdec_params = mtk_init_vdec_params,
+	.ctrls_setup = mtk_vcodec_dec_ctrls_setup,
+	.vdec_vb2_ops = &mtk_vdec_request_vb2_ops,
+	.vdec_formats = mtk_video_formats,
+	.num_formats = &num_formats,
+	.default_out_fmt = &default_out_format,
+	.default_cap_fmt = &default_cap_format,
+	.uses_stateless_api = true,
+	.worker = mtk_vdec_worker,
+	.flush_decoder = mtk_vdec_flush_decoder,
+	.cap_to_disp = mtk_vdec_stateless_cap_to_disp,
+	.get_cap_buffer = vdec_get_cap_buffer,
+	.is_subdev_supported = false,
+	.hw_arch = MTK_VDEC_PURE_SINGLE_CORE,
+	.direct = &mtk_vdec_mt6785_direct_data,
 };
 
 /* This platform data is used for one lat and one core architecture. */

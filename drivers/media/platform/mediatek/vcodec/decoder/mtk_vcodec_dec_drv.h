@@ -13,6 +13,7 @@
 #include "../common/mtk_vcodec_dbgfs.h"
 #include "../common/mtk_vcodec_fw_priv.h"
 #include "../common/mtk_vcodec_util.h"
+#include "mtk_vcodec_dec_direct.h"
 #include "vdec_msg_queue.h"
 
 #define MTK_VCODEC_DEC_NAME	"mtk-vcodec-dec"
@@ -23,6 +24,7 @@
 
 enum mtk_vcodec_dec_chip_name {
 	MTK_VDEC_INVAL = 0,
+	MTK_VDEC_MT6785 = 6785,
 	MTK_VDEC_MT8173 = 8173,
 	MTK_VDEC_MT8183 = 8183,
 	MTK_VDEC_MT8186 = 8186,
@@ -43,6 +45,7 @@ enum mtk_vdec_format_types {
 	MTK_VDEC_FORMAT_VP9_FRAME = 0x400,
 	MTK_VDEC_FORMAT_AV1_FRAME = 0x800,
 	MTK_VDEC_FORMAT_HEVC_FRAME = 0x1000,
+	MTK_VDEC_FORMAT_MPEG2_SLICE = 0x2000,
 	MTK_VCODEC_INNER_RACING = 0x20000,
 	MTK_VDEC_IS_SUPPORT_10BIT = 0x40000,
 	MTK_VDEC_IS_SUPPORT_EXT = 0x80000,
@@ -107,6 +110,9 @@ struct vdec_pic_info {
  *
  * @is_subdev_supported: whether support parent-node architecture(subdev)
  * @uses_stateless_api: whether the decoder uses the stateless API with requests
+ *
+ * @direct: set for a decoder that the host programs through its registers,
+ *	    without firmware
  */
 struct mtk_vcodec_dec_pdata {
 	void (*init_vdec_params)(struct mtk_vcodec_dec_ctx *ctx);
@@ -128,6 +134,8 @@ struct mtk_vcodec_dec_pdata {
 
 	bool is_subdev_supported;
 	bool uses_stateless_api;
+
+	const struct mtk_vdec_direct_data *direct;
 };
 
 /**
@@ -145,6 +153,7 @@ struct mtk_vcodec_dec_request {
  *
  * @type: type of decoder instance
  * @dev: pointer to the mtk_vcodec_dec_dev of the device
+ * @vdec_pdata: platform data of the video device this context was opened on
  * @list: link to ctx_list of mtk_vcodec_dec_dev
  *
  * @fh: struct v4l2_fh
@@ -192,6 +201,7 @@ struct mtk_vcodec_dec_request {
 struct mtk_vcodec_dec_ctx {
 	enum mtk_instance_type type;
 	struct mtk_vcodec_dec_dev *dev;
+	const struct mtk_vcodec_dec_pdata *vdec_pdata;
 	struct list_head list;
 
 	struct v4l2_fh fh;
@@ -239,6 +249,8 @@ struct mtk_vcodec_dec_ctx {
  * struct mtk_vcodec_dec_dev - driver data
  * @v4l2_dev: V4L2 device to register video devices for.
  * @vfd_dec: Video device for decoder
+ * @vfd_dec_stateful: second video device with the stateful interface, if any
+ * @m2m_dev_dec_stateful: m2m device of @vfd_dec_stateful
  * @mdev_dec: Media device for decoder
  *
  * @m2m_dev_dec: m2m device for decoder
@@ -280,9 +292,11 @@ struct mtk_vcodec_dec_ctx {
 struct mtk_vcodec_dec_dev {
 	struct v4l2_device v4l2_dev;
 	struct video_device *vfd_dec;
+	struct video_device *vfd_dec_stateful;
 	struct media_device mdev_dec;
 
 	struct v4l2_m2m_dev *m2m_dev_dec;
+	struct v4l2_m2m_dev *m2m_dev_dec_stateful;
 	struct platform_device *plat_dev;
 	struct list_head ctx_list;
 	struct mtk_vcodec_dec_ctx *curr_ctx;
