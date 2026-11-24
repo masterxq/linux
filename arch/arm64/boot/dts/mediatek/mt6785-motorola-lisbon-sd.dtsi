@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): microSD card slot on MSDC1.
+ *
+ *  - 4-bit SD bus on GPIO134 (CLK), GPIO135 (CMD), GPIO136..139 (DAT3, DAT0, DAT2, DAT1), mode 1
+ *  - card detect on GPIO8 (EINT8) with the internal pull-up; the line is high while a card is
+ *    inserted
+ *  - card supply VMCH = MT6360 LDO5 at 3.0 V, I/O supply VMC = MT6360 LDO3 at 3.0 V, switched to
+ *    1.8 V for the UHS modes; the bootloader leaves both off
+ *  - SD high speed and UHS SDR12/SDR25/SDR50/SDR104/DDR50, no eMMC; source clock msdcpll / 2,
+ *    max-frequency 200 MHz (msdcpll runs at 384 MHz, so 192 MHz at most)
+ *  - pads: 8 mA for CLK, CMD and DAT in every mode (drive code 3), CMD/DAT 50 kOhm pull-up and CLK
+ *    50 kOhm pull-down (R1 = 1, R0 = 0) as the vendor driver sets them at power-up
+ * There is no write-protect switch on a microSD slot.
+ */
+
+#include <dt-bindings/clock/mediatek,mt6785-clk.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/mediatek,mt6785-pinfunc.h>
+
+&mmc1 {
+	bus-width = <4>;
+	cd-gpios = <&pio 8 GPIO_ACTIVE_HIGH>;
+	max-frequency = <200000000>;
+
+	cap-sd-highspeed;
+	disable-wp;
+	no-mmc;
+	no-sdio;
+	sd-uhs-ddr50;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+
+	vmmc-supply = <&mt6360_ldo5>;
+	vqmmc-supply = <&mt6360_ldo3>;
+
+	assigned-clocks = <&topckgen CLK_TOP_MSDC30_1>;
+	assigned-clock-parents = <&topckgen CLK_TOP_MSDCPLL_D2>;
+
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc1_pins>, <&mmc1_pins_detect>;
+	pinctrl-1 = <&mmc1_pins>, <&mmc1_pins_detect>;
+
+	status = "okay";
+};
+
+&mt6360 {
+	regulator {
+		mt6360_ldo3: ldo3 {
+			regulator-name = "vmc";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <3000000>;
+		};
+
+		mt6360_ldo5: ldo5 {
+			regulator-name = "vmch";
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3000000>;
+		};
+	};
+};
+
+&pio {
+	mmc1_pins: mmc1-pins {
+		pins-cmd-dat {
+			pinmux = <PINMUX_GPIO135__FUNC_MSDC1_CMD>,
+				 <PINMUX_GPIO137__FUNC_MSDC1_DAT0>,
+				 <PINMUX_GPIO139__FUNC_MSDC1_DAT1>,
+				 <PINMUX_GPIO138__FUNC_MSDC1_DAT2>,
+				 <PINMUX_GPIO136__FUNC_MSDC1_DAT3>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+			drive-strength = <8>;
+			input-enable;
+			input-schmitt-enable;
+		};
+
+		pins-clk {
+			pinmux = <PINMUX_GPIO134__FUNC_MSDC1_CLK>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+			drive-strength = <8>;
+		};
+	};
+
+	mmc1_pins_detect: mmc1-detect-pins {
+		pins-insert {
+			pinmux = <PINMUX_GPIO8__FUNC_GPIO8>;
+			bias-pull-up;
+			input-enable;
+			input-schmitt-enable;
+		};
+	};
+};

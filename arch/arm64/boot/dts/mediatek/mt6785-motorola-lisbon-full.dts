@@ -38,3 +38,4 @@
 #include "mt6785-motorola-lisbon-vcodec.dtsi"
 #include "mt6785-motorola-lisbon-iommu.dtsi"
 #include "mt6785-motorola-lisbon-mdp.dtsi"
+#include "mt6785-motorola-lisbon-sd.dtsi"
