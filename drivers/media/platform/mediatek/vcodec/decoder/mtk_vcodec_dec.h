@@ -22,6 +22,13 @@
 #define MTK_VDEC_MIN_W	64U
 #define MTK_VDEC_MIN_H	64U
 
+/*
+ * Capture buffers of the stateless decoders without firmware: players
+ * allocate a new set on each renegotiation while frames of the old one are
+ * still on display.
+ */
+#define MTK_VDEC_DIRECT_MAX_CAPTURE	64
+
 #define MTK_VDEC_IRQ_STATUS_DEC_SUCCESS        0x10000
 
 /**
@@ -29,11 +36,23 @@
  * @base_y	: Y plane memory info
  * @base_c	: C plane memory info
  * @status      : frame buffer status (vdec_fb_status)
+ * @buf_w	: coded width of the capture format the buffer was queued with
+ * @buf_h	: coded height of the capture format the buffer was queued with
+ * @pic_w	: width of the picture decoded into the buffer, 0 for none
+ * @pic_h	: height of the picture decoded into the buffer
+ *
+ * A stateless decoder may get a new capture format while buffers of the old
+ * one are still references: the layout of a buffer is the one of the format
+ * it was queued with, not the current one.
  */
 struct vdec_fb {
 	struct mtk_vcodec_mem	base_y;
 	struct mtk_vcodec_mem	base_c;
 	unsigned int	status;
+	unsigned int	buf_w;
+	unsigned int	buf_h;
+	unsigned int	pic_w;
+	unsigned int	pic_h;
 };
 
 /**
@@ -67,6 +86,7 @@ struct mtk_video_dec_buf {
 extern const struct v4l2_ioctl_ops mtk_vdec_ioctl_ops;
 extern const struct v4l2_m2m_ops mtk_vdec_m2m_ops;
 extern const struct media_device_ops mtk_vcodec_media_ops;
+extern const struct mtk_vcodec_dec_pdata mtk_vdec_mt6785_pdata;
 extern const struct mtk_vcodec_dec_pdata mtk_vdec_8173_pdata;
 extern const struct mtk_vcodec_dec_pdata mtk_vdec_8183_pdata;
 extern const struct mtk_vcodec_dec_pdata mtk_lat_sig_core_pdata;
