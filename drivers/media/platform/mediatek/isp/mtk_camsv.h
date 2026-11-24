@@ -11,8 +11,10 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/kref.h>
 #include <linux/pm_runtime.h>
 #include <linux/videodev2.h>
+#include <linux/workqueue.h>
 #include <media/media-entity.h>
 #include <media/v4l2-subdev.h>
 #include <media/videobuf2-core.h>
@@ -22,9 +24,13 @@
 
 #define IMG_MAX_WIDTH			5376U
 #define IMG_MAX_HEIGHT			4032U
+#define IMG_DEF_WIDTH			1920U
+#define IMG_DEF_HEIGHT			1080U
 #define IMG_MIN_WIDTH			80U
 #define IMG_MIN_HEIGHT			60U
 #define MAX_SUPPORTED_NUM_PLANES	1U
+/* largest frame: 16 bits per pixel */
+#define IMG_MAX_SIZEIMAGE		(IMG_MAX_WIDTH * 2 * IMG_MAX_HEIGHT)
 
 #define MTK_CAM_CIO_PAD_SENINF		0U
 #define MTK_CAM_CIO_PAD_VIDEO		1U
@@ -41,8 +47,8 @@ struct mtk_cam_format_info {
 	u32 imgo_stride;
 };
 
-const struct mtk_cam_format_info *mtk_cam_format_info_by_code(u32 code);
-void mtk_cam_format_info_apply_out_mode(unsigned int out_mode);
+const struct mtk_cam_format_info *mtk_cam_format_info_find(u32 code,
+							   u32 fourcc);
 
 
 struct mtk_cam_dev_buffer {
@@ -65,6 +71,7 @@ struct mtk_cam_vdev_desc {
 
 /**
  * struct mtk_cam_video_device - MediaTek video device structure
+ * @cam: The CAMSV, held until the node is released
  * @desc: The node description of video device
  * @vdev_pad: The media pad graph object of video device
  * @vdev: The video device instance
@@ -72,8 +79,13 @@ struct mtk_cam_vdev_desc {
  * @vdev_lock: Serializes vb2 queue and video device operations
  * @format: The V4L2 format of video device
  * @fmtinfo: Information about the current format
+ *
+ * Allocated each time the seninf binds the CAMSV and freed in the release
+ * of @vdev, after the last open file: an unbind does not free a node that
+ * user space still holds open, and a node registered again is a new one.
  */
 struct mtk_cam_video_device {
+	struct mtk_cam_dev *cam;
 	const struct mtk_cam_vdev_desc *desc;
 
 	struct media_pad vdev_pad;
@@ -97,14 +109,26 @@ struct mtk_cam_video_device {
  * @clks: The clocks.
  * @irq: Irq fired when buffer is ready.
  * @conf: soc specific driver data.
- * @pipeline: Media pipeline information.
  * @subdev: The V4L2 sub-device instance.
  * @subdev_pads: Media pads of this sub-device.
- * @vdev: The video device node.
+ * @vdev: The video device node while the seninf has bound the CAMSV, or NULL.
  * @seninf: Pointer to the seninf pad.
+ * @default_fmt: Pixel format of the video node after registration.
+ * @streaming: The stream is running in the hardware (start_streaming
+ *	succeeded and stop_streaming has not run yet). The system sleep
+ *	callbacks stop and restart only such a stream.
+ * @stream_fmtinfo: Packer and DMA setup of the running stream.
+ * @stream_width: Width of the running stream in pixels.
+ * @stream_height: Height of the running stream in lines.
+ * @stream_bpl: Bytes per line of the running stream.
  * @sequence: Buffer sequence number.
  * @buf_list_lock: Protects the buffer list.
  * @buf_list: List head for the buffer list.
+ * @kref: References of the driver (until the unbind), of the registered
+ *	sub-device (until its device node is released) and of each video node
+ *	(until its release). The structure is freed with the last of them.
+ * @put_work: Drops the references of released sub-device registrations.
+ * @deferred_puts: Number of references @put_work has to drop.
  */
 struct mtk_cam_dev {
 	struct device *dev;
@@ -117,12 +141,18 @@ struct mtk_cam_dev {
 	unsigned int irq;
 	const struct mtk_cam_conf *conf;
 
-	struct media_pipeline pipeline;
 	struct v4l2_subdev subdev;
 	struct media_pad subdev_pads[MTK_CAM_CIO_NUM_PADS];
-	struct mtk_cam_video_device vdev;
+	struct mtk_cam_video_device *vdev;
 	struct media_pad *seninf;
+	u32 default_fmt;
+	bool streaming;
+	const struct mtk_cam_format_info *stream_fmtinfo;
+	u32 stream_width;
+	u32 stream_height;
+	u32 stream_bpl;
 	unsigned int sequence;
+	u32 tg_sen_mode;	/* TG_SEN_MODE of the current stream */
 
 	spinlock_t buf_list_lock;
 	struct list_head buf_list;
@@ -137,10 +167,15 @@ struct mtk_cam_dev {
 	u32 irq_cnt;
 	u32 done_cnt;
 	u32 err_cnt;
+	u32 err_frames;
+	u32 frame_errs;
+	u32 frame_status;
 	u32 scratch_cnt;
 	u32 last_status;
 	struct dentry *dbg;
-	bool vdev_registered;
+	struct kref kref;
+	struct work_struct put_work;
+	atomic_t deferred_puts;
 };
 
 /**
@@ -154,6 +189,8 @@ struct mtk_cam_dev {
  * @imgo_stride: IMGO STRIDE register offset
  * @imgo_con_reg: IMGO CON register offset
  * @imgo_con2_reg: IMGO CON2 register offset
+ * @imgo_con3: dma control register 3 value
+ * @imgo_con3_reg: IMGO CON3 register offset, 0 if not written
  * @has_fbc: single-register IMGO FBC at top+0x1c (MT8365); without it the
  *	driver re-programs IMGO_BASE_ADDR per frame and parks the DMA on a
  *	scratch buffer when no user buffer is queued (MT8183)
@@ -168,14 +205,22 @@ struct mtk_cam_conf {
 	u32 imgo_stride;
 	u32 imgo_con_reg;
 	u32 imgo_con2_reg;
+	u32 imgo_con3;
+	u32 imgo_con3_reg;
 	bool has_fbc;
 	bool pak_reversed;	/* MT8183: PAK 0=RAW8 .. 3=RAW14 (MT8365: 0=RAW14 .. 3=RAW8) */
+	bool pak_pix_mode;	/* MT6785: PAK and IMGO bus follow the pixel mode */
+	bool all_clks;		/* take every clock of the node (MT6785: cam, camtg, sv0, sv1) */
+	bool tg_idle_stop;	/* stop: wait for the TG to go idle, then reset the IMGO DMA */
 };
 
 int mtk_cam_dev_init(struct mtk_cam_dev *cam_dev);
 void mtk_cam_dev_cleanup(struct mtk_cam_dev *cam_dev);
+void mtk_cam_dev_get(struct mtk_cam_dev *cam_dev);
+void mtk_cam_dev_put(struct mtk_cam_dev *cam_dev);
+void mtk_cam_dev_put_deferred(struct mtk_cam_dev *cam_dev);
 int mtk_cam_video_register(struct mtk_cam_dev *cam_dev);
-void mtk_cam_video_unregister(struct mtk_cam_video_device *vdev);
+void mtk_cam_video_unregister(struct mtk_cam_dev *cam_dev);
 void mtk_cam_vb2_return_all_buffers(struct mtk_cam_dev *cam,
 				    enum vb2_buffer_state state);
 

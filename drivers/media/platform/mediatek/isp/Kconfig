@@ -5,6 +5,7 @@ config MTK_CAMSV
 	depends on ARCH_MEDIATEK || COMPILE_TEST
 	depends on OF
 	depends on PM
+	depends on VIDEO_DEV
 	select MEDIA_CONTROLLER
 	select MTK_SENINF30
 	select VIDEO_V4L2_SUBDEV_API
