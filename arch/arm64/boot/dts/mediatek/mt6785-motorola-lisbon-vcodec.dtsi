@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): video decoder and video encoder and the clocks the VDEC power
+ * domain needs for them. Their memory ports go through the IOMMU (lisbon-iommu). The domains
+ * stay off until a driver powers them for a job.
+ */
+
+/*
+ * The vdecsys clock controller is switched off in lisbon-common; the VDEC domain and the decoder
+ * take its gates. Like vencsys it has no power domain of its own and does not touch the hardware
+ * unless one of its gates is switched, which happens only while the VDEC domain is on.
+ */
+&vdecsys {
+	status = "okay";
+};
+
+/*
+ * The VDEC domain sits below MM like the VENC domain and takes top_mm the same way (see
+ * lisbon-jpegenc.dtsi). The larb2 gate is the bus path of the decoder and is held by the domain
+ * as a subsys clock: opened after the bus protection is released, closed after the protection
+ * is set and the SRAM is down. The decoder gate stays with the decoder driver.
+ *
+ * The power controller gets these clocks when it probes, so it cannot probe without the vdecsys
+ * clock provider: the vdecsys clock driver (COMMON_CLK_MT6785_VDEC) has to be built in wherever
+ * this file is part of the DTB, or no power domain is registered at all.
+ */
+&{/soc/syscon@10006000/power-controller/power-domain@11/power-domain@12} {
+	clocks = <&topckgen CLK_TOP_MM>, <&topckgen CLK_TOP_VDEC>,
+		 <&vdecsys CLK_VDEC_LARB1>;
+	clock-names = "mm", "vdec", "vdec-0";
+};
+
+&vcodec_dec {
+	status = "okay";
+};
+
+&vcodec_enc {
+	status = "okay";
+};

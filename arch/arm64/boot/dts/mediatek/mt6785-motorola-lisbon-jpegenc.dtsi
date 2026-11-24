@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): the JPEG encoder and the clocks the VENC power domain needs for
+ * it. Its memory ports go through the IOMMU (lisbon-iommu). The domain stays off until the
+ * encoder driver (mtk-jpeg, a module) powers it for a job.
+ */
+
+/*
+ * The vencsys clock controller is switched off in lisbon-common; the VENC domain and the encoder
+ * take its gates. It has no power domain of its own and does not touch the hardware unless one of
+ * its gates is switched, which happens only while the VENC domain is on.
+ */
+&vencsys {
+	status = "okay";
+};
+
+/*
+ * The VENC domain sits below MM like the ISP domain: lisbon takes MM over from lk (keep-boot-state
+ * in lisbon-pd.dtsi), so nothing holds the MM bus clock once the display is off. As for ISP in
+ * lisbon-isp.dtsi, the domain takes top_mm before its power-on sequence and keeps it while it is
+ * on.
+ *
+ * The vendor VENC power-on opens all VENCSYS gates (larb, encoder core, JPEG encoder, GALS) after
+ * the bus protection is released, and its clock driver never closes them; the power-off sets the
+ * protection with the gates open. The ISP domain does not acknowledge its power-off protection
+ * with its larb gates closed. The VENC domain therefore holds the gates of the bus path, the larb3
+ * gate and the GALS gate, as subsys clocks: opened after the bus protection is released, closed
+ * after the protection is set and the SRAM is down. The encoder gates stay with their drivers.
+ * With the larb3 gate held by the domain, the larb registers are accessible whenever the domain
+ * is on.
+ *
+ * The power controller gets these clocks when it probes, so it cannot probe without the vencsys
+ * clock provider: the vencsys clock driver (COMMON_CLK_MT6785_VENC) has to be built in wherever
+ * this file is part of the DTB, or no power domain is registered at all.
+ */
+&{/soc/syscon@10006000/power-controller/power-domain@11/power-domain@13} {
+	clocks = <&topckgen CLK_TOP_MM>, <&topckgen CLK_TOP_VENC>,
+		 <&vencsys CLK_VENC_LARB>, <&vencsys CLK_VENC_GALS>;
+	clock-names = "mm", "venc", "venc-0", "venc-1";
+};
+
+/* JPEG encoder, driver mtk-jpeg (a module, loads through its device alias) */
+&venc_jpg {
+	status = "okay";
+};
