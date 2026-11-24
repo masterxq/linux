@@ -189,6 +189,22 @@ static void mtk_mmsys_update_bits(struct mtk_mmsys *mmsys, u32 offset, u32 mask,
 	writel_relaxed(tmp, mmsys->regs + offset);
 }
 
+/* The memory path uses muxes disjoint from the display path. */
+int mtk_mmsys_mdp_linear_route(struct device *dev, bool enable)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+
+	if (mmsys->data != &mt6785_mmsys_driver_data)
+		return -EOPNOTSUPP;
+
+	mtk_mmsys_update_bits(mmsys, 0xf24, BIT(2), enable ? BIT(2) : 0, NULL);
+	mtk_mmsys_update_bits(mmsys, 0xfa0, GENMASK(1, 0), enable ? 3 : 0, NULL);
+	mtk_mmsys_update_bits(mmsys, 0xfb4, GENMASK(1, 0), 0, NULL);
+	mtk_mmsys_update_bits(mmsys, 0xf58, BIT(0), 0, NULL);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_mdp_linear_route);
+
 void mtk_mmsys_ddp_connect(struct device *dev,
 			   enum mtk_ddp_comp_id cur,
 			   enum mtk_ddp_comp_id next)
