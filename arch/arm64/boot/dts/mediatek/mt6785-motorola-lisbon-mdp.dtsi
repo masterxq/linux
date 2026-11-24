@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/* Only the MDP ports use translation; display ports retain their current mapping. */
+&gce {
+	status = "okay";
+};
+
+&mutex {
+	mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x6000 0x1000>;
+};
+
+&larb1 {
+	status = "okay";
+};
+
+&{/soc} {
+	video-converter@14001000 {
+		compatible = "mediatek,mt6785-mdp-linear";
+		reg = <0 0x14001000 0 0x1000>, <0 0x14005000 0 0x1000>;
+		reg-names = "reader", "writer";
+		clocks = <&mmsys CLK_MM_MDP_RDMA0>, <&mmsys CLK_MM_MDP_WROT0>;
+		clock-names = "reader", "writer";
+		power-domains = <&spm MT6785_POWER_DOMAIN_MM>;
+		iommus = <&iommu M4U_PORT_MDP_RDMA0>,
+			 <&iommu M4U_PORT_MDP_WROT0_R>, <&iommu M4U_PORT_MDP_WROT0_W>;
+		mboxes = <&gce 16 0>;
+		mediatek,mmsys = <&mmsys>;
+		mediatek,mutex = <&mutex>;
+		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0 0x6000>;
+		mediatek,gce-events = <2 7 30 35>;
+	};
+};

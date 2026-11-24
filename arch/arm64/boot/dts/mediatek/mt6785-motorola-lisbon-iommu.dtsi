@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): the multimedia IOMMU (M4U0) with SMI common and the larbs of the
+ * video decoder (larb2), of the video and JPEG encoders (larb3), of the ISP blocks DIP and MFB
+ * (larb5) and of the CAMSVs (larb6). The nodes of these blocks carry their ports in "iommus"
+ * (mt6785.dtsi); their buffers come from the DMA API through the IOMMU and need neither be
+ * contiguous nor below 4 GiB.
+ *
+ * The display (larb0/1) stays with physical addresses: its larbs stay without the SMI larb
+ * driver (disabled in lisbon-common), its nodes have no iommus (lisbon-drm), and the IOMMU
+ * skips the disabled larbs of its "mediatek,larbs" list. The SMI larb driver sets only the
+ * IOMMU bits of the ports that belong to a device behind the IOMMU, so the ports of the running
+ * display stay untouched.
+ *
+ * Needs lisbon-vcodec and lisbon-jpegenc (vdecsys and vencsys clocks of larb2 and larb3),
+ * lisbon-isp and lisbon-kamera (imgsys and camsys clocks of larb5 and larb6) and lisbon-drm
+ * (mmsys clocks of SMI common and of the MM domain below).
+ */
+
+&iommu {
+	status = "okay";
+};
+
+&smi_common {
+	status = "okay";
+};
+
+&larb2 {
+	status = "okay";
+};
+
+&larb3 {
+	status = "okay";
+};
+
+&larb5 {
+	status = "okay";
+};
+
+&larb6 {
+	status = "okay";
+};
+
+/*
+ * The MM domain carries the boot display, which lisbon takes over from lk (keep-boot-state in
+ * lisbon-pd.dtsi): the domain stays on for good. As on MT8183, it holds the clocks of the SMI
+ * common, of larb0/1 and of the GALS between SMI common and the memory as subsys clocks. A
+ * domain kept on at boot takes its clocks at probe, so these gates stay open while SMI common
+ * runs runtime PM for the video blocks: its runtime suspend would otherwise close them under
+ * the running display. The power controller gets these clocks when it probes, so it needs the
+ * mmsys clock driver (COMMON_CLK_MT6785_MM, built in with the display).
+ */
+&{/soc/syscon@10006000/power-controller/power-domain@11} {
+	clocks = <&topckgen CLK_TOP_MM>,
+		 <&mmsys CLK_MM_SMI_COMMON>,
+		 <&mmsys CLK_MM_SMI_LARB0>,
+		 <&mmsys CLK_MM_SMI_LARB1>,
+		 <&mmsys CLK_MM_GALS_COMM0>,
+		 <&mmsys CLK_MM_GALS_COMM1>;
+	clock-names = "mm", "mm-0", "mm-1", "mm-2", "mm-3", "mm-4";
+};
