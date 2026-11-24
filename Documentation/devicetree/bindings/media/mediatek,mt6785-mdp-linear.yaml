@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/mediatek,mt6785-mdp-linear.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 memory video format converter
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description:
+  The memory path contains a block-layout reader and a linear image writer.
+  A multimedia mutex synchronizes the stream; GCE programs stripe transfers.
+  The memory ports are attached to SMI larb1. No coprocessor is involved.
+
+properties:
+  compatible:
+    const: mediatek,mt6785-mdp-linear
+  reg:
+    items:
+      - description: Memory reader registers
+      - description: Image writer registers
+  reg-names:
+    items:
+      - const: reader
+      - const: writer
+  clocks:
+    maxItems: 2
+  clock-names:
+    items:
+      - const: reader
+      - const: writer
+  power-domains:
+    maxItems: 1
+  iommus:
+    maxItems: 3
+  mboxes:
+    maxItems: 1
+  mediatek,mmsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Multimedia stream routing controller
+  mediatek,mutex:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Multimedia synchronization controller
+  mediatek,gce-client-reg:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    items:
+      items:
+        - description: GCE controller
+        - description: Register subsystem identifier
+        - description: Register window offset
+        - description: Register window size
+    description: GCE register window containing the reader and writer
+  mediatek,gce-events:
+    description: Stream start and completion event identifiers for GCE
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    items:
+      - description: Reader stream start
+      - description: Writer stream start
+      - description: Reader frame completion
+      - description: Writer memory completion
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - clocks
+  - clock-names
+  - power-domains
+  - iommus
+  - mboxes
+  - mediatek,mmsys
+  - mediatek,mutex
+  - mediatek,gce-client-reg
+  - mediatek,gce-events
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/memory/mediatek,mt6785-memory-port.h>
+    #include <dt-bindings/power/mediatek,mt6785-power.h>
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        video-converter@14001000 {
+            compatible = "mediatek,mt6785-mdp-linear";
+            reg = <0 0x14001000 0 0x1000>, <0 0x14005000 0 0x1000>;
+            reg-names = "reader", "writer";
+            clocks = <&mmsys CLK_MM_MDP_RDMA0>, <&mmsys CLK_MM_MDP_WROT0>;
+            clock-names = "reader", "writer";
+            power-domains = <&spm MT6785_POWER_DOMAIN_MM>;
+            iommus = <&iommu M4U_PORT_MDP_RDMA0>,
+                     <&iommu M4U_PORT_MDP_WROT0_R>, <&iommu M4U_PORT_MDP_WROT0_W>;
+            mboxes = <&gce 16 0>;
+            mediatek,mmsys = <&mmsys>;
+            mediatek,mutex = <&mutex>;
+            mediatek,gce-client-reg = <&gce 1 0 0x6000>;
+            mediatek,gce-events = <2 7 30 35>;
+        };
+    };

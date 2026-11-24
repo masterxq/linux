@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/mediatek,mt6785-vcodec.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6785 video decoder and video encoder
+
+maintainers:
+  - masterxq <masterxq@users.noreply.github.com>
+
+description:
+  The MT6785 has a video decoder (VDEC, in the VDEC power domain, memory
+  ports on SMI larb2) and a video encoder (VENC, in the VENC power domain,
+  memory ports on SMI larb3). Both are programmed through their registers by
+  the CPU; no coprocessor is involved. Their memory ports go through the
+  multimedia IOMMU.
+
+properties:
+  compatible:
+    enum:
+      - mediatek,mt6785-vcodec-dec
+      - mediatek,mt6785-vcodec-enc
+
+  reg:
+    maxItems: 1
+    description:
+      Register window of the block. For the decoder it covers all of its
+      sub-blocks (bitstream reader, motion compensation, motion vectors,
+      post-processing, control) from 0x16020000.
+
+  interrupts:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: Clock gate of the decoder or encoder core
+
+  clock-names:
+    enum:
+      - vdec
+      - venc
+
+  iommus:
+    minItems: 1
+    maxItems: 32
+    description:
+      The memory ports of the block in the IOMMU, see
+      Documentation/devicetree/bindings/iommu/mediatek,iommu.yaml.
+
+  mediatek,vdecsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The vdecsys syscon. The decoder reads its activity status and sets its
+      clock enable there.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - power-domains
+  - clocks
+  - clock-names
+  - iommus
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: mediatek,mt6785-vcodec-dec
+    then:
+      properties:
+        clock-names:
+          const: vdec
+      required:
+        - mediatek,vdecsys
+    else:
+      properties:
+        clock-names:
+          const: venc
+        mediatek,vdecsys: false
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6785-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/memory/mediatek,mt6785-memory-port.h>
+    #include <dt-bindings/power/mediatek,mt6785-power.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        video-codec@16020000 {
+            compatible = "mediatek,mt6785-vcodec-dec";
+            reg = <0 0x16020000 0 0x10000>;
+            interrupts = <GIC_SPI 329 IRQ_TYPE_LEVEL_LOW>;
+            clocks = <&vdecsys CLK_VDEC_MAIN>;
+            clock-names = "vdec";
+            power-domains = <&spm MT6785_POWER_DOMAIN_VDEC>;
+            iommus = <&iommu M4U_PORT_VDEC_MC_EXT>,
+                     <&iommu M4U_PORT_VDEC_UFO_EXT>,
+                     <&iommu M4U_PORT_VDEC_PP_EXT>,
+                     <&iommu M4U_PORT_VDEC_PRED_RD_EXT>,
+                     <&iommu M4U_PORT_VDEC_PRED_WR_EXT>,
+                     <&iommu M4U_PORT_VDEC_PPWRAP_EXT>,
+                     <&iommu M4U_PORT_VDEC_TILE_EXT>,
+                     <&iommu M4U_PORT_VDEC_VLD_EXT>,
+                     <&iommu M4U_PORT_VDEC_VLD2_EXT>,
+                     <&iommu M4U_PORT_VDEC_AVC_MV_EXT>,
+                     <&iommu M4U_PORT_VDEC_UFO_ENC_EXT>,
+                     <&iommu M4U_PORT_VDEC_RG_CTRL_DMA_EXT>;
+            mediatek,vdecsys = <&vdecsys>;
+        };
+
+        video-codec@17020000 {
+            compatible = "mediatek,mt6785-vcodec-enc";
+            reg = <0 0x17020000 0 0x2000>;
+            interrupts = <GIC_SPI 270 IRQ_TYPE_LEVEL_LOW>;
+            clocks = <&vencsys CLK_VENC_MAIN>;
+            clock-names = "venc";
+            power-domains = <&spm MT6785_POWER_DOMAIN_VENC>;
+            iommus = <&iommu M4U_PORT_VENC_RCPU>,
+                     <&iommu M4U_PORT_VENC_REC>,
+                     <&iommu M4U_PORT_VENC_BSDMA>,
+                     <&iommu M4U_PORT_VENC_SV_COMV>,
+                     <&iommu M4U_PORT_VENC_RD_COMV>,
+                     <&iommu M4U_PORT_VENC_NBM_RDMA>,
+                     <&iommu M4U_PORT_VENC_NBM_RDMA_LITE>,
+                     <&iommu M4U_PORT_VENC_NBM_WDMA>,
+                     <&iommu M4U_PORT_VENC_NBM_WDMA_LITE>,
+                     <&iommu M4U_PORT_VENC_CUR_LUMA>,
+                     <&iommu M4U_PORT_VENC_CUR_CHROMA>,
+                     <&iommu M4U_PORT_VENC_REF_LUMA>,
+                     <&iommu M4U_PORT_VENC_REF_CHROMA>;
+        };
+    };
+...
