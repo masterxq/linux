@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): fingerprint sensor (FPC) behind the TEE.
+ *
+ * mobicore: notification interrupt of the Trustonic TEE that the boot chain starts in the secure
+ * world. Its driver is an external module; without it nothing calls into the TEE.
+ *
+ * fingerprint: the sensor sits on SPI0, which only the secure world drives, so spi0 stays disabled
+ * and this node takes the SPI0 clocks. The normal world owns the supply (MT6360 LDO1, VFP, always
+ * on, plus a GPIO switch), the reset line and the interrupt line. Without the lisbon-fpc driver the
+ * GPIOs keep the state the bootloader left. Its pin state selects the GPIO function and no bias on
+ * the interrupt line.
+ */
+
+#include <dt-bindings/clock/mediatek,mt6785-clk.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+&pio {
+	fingerprint_pins: fingerprint-pins {
+		pins-irq {
+			pinmux = <PINMUX_GPIO75__FUNC_GPIO75>;
+			input-enable;
+			bias-disable;
+		};
+
+		pins-ctrl {
+			pinmux = <PINMUX_GPIO79__FUNC_GPIO79>,
+				 <PINMUX_GPIO105__FUNC_GPIO105>;
+		};
+	};
+};
+
+/ {
+	mobicore {
+		compatible = "trustonic,mobicore";
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_SPI 89 IRQ_TYPE_EDGE_RISING 0>;
+	};
+
+	fingerprint {
+		compatible = "motorola,lisbon-fpc-tee";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fingerprint_pins>;
+		reset-gpios = <&pio 105 GPIO_ACTIVE_LOW>;
+		enable-gpios = <&pio 79 GPIO_ACTIVE_HIGH>;
+		irq-gpios = <&pio 75 GPIO_ACTIVE_HIGH>;
+		vdd-supply = <&mt6360_ldo1>;
+		clocks = <&topckgen CLK_TOP_MAINPLL_D5_D2>,
+			 <&topckgen CLK_TOP_SPI>, <&infracfg CLK_INFRA_SPI0>;
+		clock-names = "parent", "selector", "spi";
+	};
+};

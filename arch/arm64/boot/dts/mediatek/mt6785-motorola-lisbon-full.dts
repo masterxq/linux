@@ -27,3 +27,5 @@
 #include "mt6785-motorola-lisbon-audio.dtsi"
 #include "mt6785-motorola-lisbon-cpu-dvfs.dtsi"
 #include "mt6785-motorola-lisbon-lvts.dtsi"
+#include "mt6785-motorola-lisbon-scp.dtsi"
+#include "mt6785-motorola-lisbon-fpc.dtsi"
