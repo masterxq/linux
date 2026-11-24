@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Motorola Moto G60s (lisbon) with the camera description (mt6785-motorola-lisbon-kamera.dtsi). */
+
+#include "mt6785-motorola-lisbon-full.dts"

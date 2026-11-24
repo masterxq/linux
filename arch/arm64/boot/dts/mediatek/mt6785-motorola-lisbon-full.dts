@@ -29,3 +29,8 @@
 #include "mt6785-motorola-lisbon-lvts.dtsi"
 #include "mt6785-motorola-lisbon-scp.dtsi"
 #include "mt6785-motorola-lisbon-fpc.dtsi"
+#include "mt6785-motorola-lisbon-kamera.dtsi"
+#include "mt6785-motorola-lisbon-kamera-vcm.dtsi"
+#include "mt6785-motorola-lisbon-kamera-front.dtsi"
+#include "mt6785-motorola-lisbon-isp.dtsi"
+#include "mt6785-motorola-lisbon-kamera-csi0.dtsi"

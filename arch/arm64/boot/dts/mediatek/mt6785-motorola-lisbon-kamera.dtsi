@@ -1,0 +1,532 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): the five cameras (power, clocks, control buses) and the data path of
+ * the front camera.
+ * The front camera is enabled: its two LDOs, I2C4, the OV16A1Q, the CSI1 receiver, seninf and
+ * CAMSV1, so the V4L2 drivers bind like any other driver and the sensor stays off under runtime PM
+ * until a capture starts. For the other four cameras the LDOs, the buses I2C2/I2C7, the MIPI
+ * switch, the VCM and the EEPROMs stay disabled and are only enabled at runtime by the
+ * lisbon-camera-probe module (chip ID check).
+ *
+ * Wiring:
+ *  - index (camN), sensor, bus and address: cam0 OV64B40 main, I2C2 0x22, VCM DW9800V 0x0c, EEPROM
+ *    0x50; cam1 OV16A1Q front, I2C4 0x10, EEPROM 0x51; cam2 OV02B1B mono (depth), I2C7 0x3d; cam4
+ *    S5K4H7, I2C7 0x2d; cam6 S5K5E9, I2C7 0x10.
+ *  - buses: 400 kHz, open drain on I2C2/I2C4, push-pull on I2C7; pins in mode 1 with pull-up. The
+ *    three controllers have two channels: the AP uses the register window at 0x100, the camera
+ *    control unit the one at 0x200.
+ *  - supplies: AVDD, DVDD and AFVDD are external LDOs switched by GPIOs: cam0 AVDD GPIO123, DVDD
+ *    GPIO107, AFVDD GPIO21; cam1 AVDD GPIO109, DVDD GPIO122; cam2/cam4/cam6 share AVDD GPIO195,
+ *    cam4/cam6 share DVDD GPIO115. The voltages are the nominal values of the vendor power
+ *    sequences. DOVDD of all sensors is MT6359 VCAMIO at 1.8 V.
+ *  - the OV02B1B power sequence does not switch GPIO115, so the OV02B1B node has no dvdd-supply
+ *  - MCLK 24 MHz = univpll_192m_d8 through topckgen camtg<n+1> on pin CMMCLK<n>: cam0 CMMCLK2
+ *    (GPIO120, camtg3), cam1 CMMCLK1 (GPIO117, camtg2), cam2 CMMCLK4 (GPIO196, camtg5), cam4
+ *    CMMCLK0 (GPIO116, camtg1), cam6 CMMCLK3 (GPIO121, camtg4); 4 mA while running, GPIO mode while
+ *    off
+ *  - reset / power-down lines: cam0 RST GPIO124, cam1 RST GPIO119, cam2 PDN GPIO197, cam4 PDN
+ *    GPIO118, cam6 RST GPIO125, all low = off.
+ *  - GPIO72 selects the MIPI switch in front of CSI0: 1 for cam4 (S5K4H7), 0 for cam2 and cam6 (off
+ *    level 0)
+ *  - orientation: only cam1 faces the front. The rotation property counts counter-clockwise: cam1
+ *    is 90, the rear cameras are 270.
+ * The EEPROM type is not known (up to 0x1d1b bytes are read with 16-bit offsets, so at least 64
+ * kbit); the nodes use the generic 24c64 and stay disabled.
+ */
+
+&pio {
+	cam_i2c2_pins: cam-i2c2-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO112__FUNC_SCL2>,
+				 <PINMUX_GPIO113__FUNC_SDA2>;
+			bias-pull-up;
+		};
+	};
+
+	cam_i2c4_pins: cam-i2c4-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO110__FUNC_SCL4>,
+				 <PINMUX_GPIO111__FUNC_SDA4>;
+			bias-pull-up;
+		};
+	};
+
+	cam_i2c7_pins: cam-i2c7-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO198__FUNC_SCL7>,
+				 <PINMUX_GPIO199__FUNC_SDA7>;
+			bias-pull-up;
+		};
+	};
+
+	cam0_mclk_off: cam0-mclk-off-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO120__FUNC_GPIO120>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam0_mclk_on: cam0-mclk-on-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO120__FUNC_CMMCLK2>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam1_mclk_off: cam1-mclk-off-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO117__FUNC_GPIO117>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam1_mclk_on: cam1-mclk-on-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO117__FUNC_CMMCLK1>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam2_mclk_off: cam2-mclk-off-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO196__FUNC_GPIO196>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam2_mclk_on: cam2-mclk-on-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO196__FUNC_CMMCLK4>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam4_mclk_off: cam4-mclk-off-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO116__FUNC_GPIO116>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam4_mclk_on: cam4-mclk-on-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO116__FUNC_CMMCLK0>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam6_mclk_off: cam6-mclk-off-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO121__FUNC_GPIO121>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam6_mclk_on: cam6-mclk-on-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO121__FUNC_CMMCLK3>;
+			drive-strength = <4>;
+		};
+	};
+};
+
+/ {
+	cam0_avdd: regulator-cam0-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&pio 123 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "disabled";
+	};
+
+	cam0_dvdd: regulator-cam0-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0-dvdd";
+		regulator-min-microvolt = <1100000>;
+		regulator-max-microvolt = <1100000>;
+		gpio = <&pio 107 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "disabled";
+	};
+
+	cam0_afvdd: regulator-cam0-afvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0-afvdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&pio 21 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "disabled";
+	};
+
+	cam1_avdd: regulator-cam1-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam1-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&pio 109 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "okay";
+	};
+
+	cam1_dvdd: regulator-cam1-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam1-dvdd";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&pio 122 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "okay";
+	};
+
+	cam246_avdd: regulator-cam246-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam246-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&pio 195 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "disabled";
+	};
+
+	cam46_dvdd: regulator-cam46-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam46-dvdd";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&pio 115 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		status = "disabled";
+	};
+
+	/*
+	 * MIPI switch in front of CSI0 (0: cam2 + cam6, 1: cam4), powered from
+	 * VCAMIO. Each sensor behind it selects its position with mux-states
+	 * while it streams; idle at 0 like the vendor power sequence.
+	 */
+	cam_mipi_switch: mux-controller-cam-mipi {
+		compatible = "gpio-mux";
+		#mux-control-cells = <0>;
+		#mux-state-cells = <1>;
+		mux-gpios = <&pio 72 GPIO_ACTIVE_HIGH>;
+		idle-state = <0>;
+		status = "disabled";
+	};
+};
+
+&i2c2 {
+	clock-frequency = <400000>;
+	mediatek,channel-offset = <0x100>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&cam_i2c2_pins>;
+
+	cam0: camera@22 {
+		compatible = "ovti,ov64b40";
+		reg = <0x22>;
+		clocks = <&topckgen CLK_TOP_CAMTG3>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG3>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_192M_D8>;
+		pinctrl-names = "default", "mclk";
+		pinctrl-0 = <&cam0_mclk_off>;
+		pinctrl-1 = <&cam0_mclk_on>;
+		avdd-supply = <&cam0_avdd>;
+		dovdd-supply = <&mt6359_vcamio_ldo_reg>;
+		dvdd-supply = <&cam0_dvdd>;
+		reset-gpios = <&pio 124 GPIO_ACTIVE_LOW>;
+		lens-focus = <&cam0_vcm>;
+		orientation = <1>;
+		rotation = <270>;
+		status = "disabled";
+	};
+
+	cam0_vcm: actuator@c {
+		compatible = "dongwoon,dw9800v";
+		reg = <0x0c>;
+		vdd-supply = <&cam0_afvdd>;
+		status = "disabled";
+	};
+
+	eeprom@50 {
+		compatible = "atmel,24c64";
+		reg = <0x50>;
+		read-only;
+		status = "disabled";
+	};
+};
+
+&i2c4 {
+	clock-frequency = <400000>;
+	mediatek,channel-offset = <0x100>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&cam_i2c4_pins>;
+	status = "okay";
+
+	camera@10 {
+		compatible = "ovti,ov16a1q";
+		reg = <0x10>;
+		clocks = <&topckgen CLK_TOP_CAMTG2>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG2>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_192M_D8>;
+		pinctrl-names = "default", "mclk";
+		pinctrl-0 = <&cam1_mclk_off>;
+		pinctrl-1 = <&cam1_mclk_on>;
+		avdd-supply = <&cam1_avdd>;
+		dovdd-supply = <&mt6359_vcamio_ldo_reg>;
+		dvdd-supply = <&cam1_dvdd>;
+		reset-gpios = <&pio 119 GPIO_ACTIVE_LOW>;
+		orientation = <0>;
+		rotation = <90>;
+
+		port {
+			ov16a1q_out: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <372500000>;
+				remote-endpoint = <&seninf_csi1_in>;
+			};
+		};
+	};
+
+	eeprom@51 {
+		compatible = "atmel,24c64";
+		reg = <0x51>;
+		read-only;
+		status = "disabled";
+	};
+};
+
+&i2c7 {
+	clock-frequency = <400000>;
+	mediatek,channel-offset = <0x100>;
+	mediatek,use-push-pull;
+	pinctrl-names = "default";
+	pinctrl-0 = <&cam_i2c7_pins>;
+
+	cam6: camera@10 {
+		compatible = "samsung,s5k5e9";
+		reg = <0x10>;
+		clocks = <&topckgen CLK_TOP_CAMTG4>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG4>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_192M_D8>;
+		pinctrl-names = "default", "mclk";
+		pinctrl-0 = <&cam6_mclk_off>;
+		pinctrl-1 = <&cam6_mclk_on>;
+		avdd-supply = <&cam246_avdd>;
+		dvdd-supply = <&cam46_dvdd>;
+		dovdd-supply = <&mt6359_vcamio_ldo_reg>;
+		reset-gpios = <&pio 125 GPIO_ACTIVE_LOW>;
+		mux-states = <&cam_mipi_switch 0>;
+		orientation = <1>;
+		rotation = <270>;
+		status = "disabled";
+
+		port {
+			s5k5e9_out: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <438000000>;
+			};
+		};
+	};
+
+	cam4: camera@2d {
+		compatible = "samsung,s5k4h7";
+		reg = <0x2d>;
+		clocks = <&topckgen CLK_TOP_CAMTG1>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG1>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_192M_D8>;
+		pinctrl-names = "default", "mclk";
+		pinctrl-0 = <&cam4_mclk_off>;
+		pinctrl-1 = <&cam4_mclk_on>;
+		avdd-supply = <&cam246_avdd>;
+		dvdd-supply = <&cam46_dvdd>;
+		dovdd-supply = <&mt6359_vcamio_ldo_reg>;
+		reset-gpios = <&pio 118 GPIO_ACTIVE_LOW>;
+		mux-states = <&cam_mipi_switch 1>;
+		orientation = <1>;
+		rotation = <270>;
+		status = "disabled";
+
+		port {
+			s5k4h7_out: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <350000000>;
+			};
+		};
+	};
+
+	camera@3d {
+		compatible = "ovti,ov02b1b";
+		reg = <0x3d>;
+		clocks = <&topckgen CLK_TOP_CAMTG5>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG5>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_192M_D8>;
+		pinctrl-names = "default", "mclk";
+		pinctrl-0 = <&cam2_mclk_off>;
+		pinctrl-1 = <&cam2_mclk_on>;
+		avdd-supply = <&cam246_avdd>;
+		dovdd-supply = <&mt6359_vcamio_ldo_reg>;
+		powerdown-gpios = <&pio 197 GPIO_ACTIVE_LOW>;
+		orientation = <1>;
+		rotation = <270>;
+		status = "disabled";
+	};
+};
+
+/*
+ * Data path of the front camera: OV16A1Q -> CSI1 (4 lanes, D-PHY) -> SENINF3 -> MUX0 ->
+ * CAM mux 2 -> CAMSV1 -> larb6 (SOCO port) -> IOMMU. The CSI-RX lane mapping of the 4D1C mode
+ * lives in the PHY driver, the sensor side uses the plain lane order.
+ */
+&csi1_rx {
+	status = "okay";
+};
+
+/*
+ * The camsys clock controller is switched off in lisbon-common; the seninf and CAMSV gates live in
+ * it. It does not touch the hardware before a camera device powers the CAM domain.
+ * The CAMSVs write through the IOMMU (lisbon-iommu.dtsi): larb6 and its clocks belong to the SMI
+ * larb driver.
+ */
+&camsys {
+	status = "okay";
+};
+
+/*
+ * The CAM domain sits below MM, and the CAM register and DMA paths run through the MM bus (SMI
+ * common, CAM-to-MM GALS); its power-on sequence releases the SMI clamp in the SMI common
+ * registers. lisbon takes MM over from lk (keep-boot-state in lisbon-pd.dtsi), so Linux never
+ * runs the MM power-on and nothing holds the MM bus clock for the camera: once the display
+ * switches off, its components drop their gates, top_mm is gated, and a CAM power-on in that
+ * state leaves every CAM register reading 0. The vendor kernel has the CAM power gate below the
+ * display power gate, which holds mm_sel. Do the same here: the CAM domain takes top_mm before
+ * its power-on sequence and keeps it while it is on.
+ */
+&{/soc/syscon@10006000/power-controller/power-domain@11/power-domain@1} {
+	clocks = <&topckgen CLK_TOP_MM>, <&topckgen CLK_TOP_CAM>;
+	clock-names = "mm", "cam";
+};
+
+&seninf {
+	phys = <&csi1_rx>;
+	phy-names = "csi1";
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+
+			seninf_csi1_in: endpoint {
+				data-lanes = <1 2 3 4>;
+				remote-endpoint = <&ov16a1q_out>;
+			};
+		};
+
+		port@4 {
+			reg = <4>;
+
+			seninf_camsv1_out: endpoint {
+				remote-endpoint = <&camsv1_in>;
+			};
+		};
+	};
+};
+
+&camsv1 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			camsv1_in: endpoint {
+				remote-endpoint = <&seninf_camsv1_out>;
+			};
+		};
+	};
+};
+
+/*
+ * Main camera: OV64B40 -> CSI2 (4 lanes, D-PHY, 1699.2 Mbit/s per lane) -> SENINF5 -> MUX1 ->
+ * CAM mux 3 -> CAMSV2 -> larb6 (SOCO port, the same as CAMSV1). This block switches the main
+ * sensor path on over the disabled defaults above: the cam0 AVDD/DVDD LDOs, I2C2, the sensor,
+ * the CSI2 receiver and CAMSV2. AFVDD and the lens and EEPROM nodes belong to the lens driver.
+ * With both CSI inputs connected the default seninf routing is port 1 -> port 4 (front) and
+ * port 2 -> port 5 (main); output port i feeds CAM mux 2 + i, CAM mux 3 is CAMSV2 (vendor
+ * camera software: CAMSV2 = TG 17 -> CAM mux 3). Link frequency from the vendor sensor
+ * driver: mipi_pixel_rate 679.68 MHz * 10 bit / 4 lanes = 1699.2 Mbit/s, 849.6 MHz DDR.
+ */
+&cam0_avdd {
+	status = "okay";
+};
+
+&cam0_dvdd {
+	status = "okay";
+};
+
+&i2c2 {
+	status = "okay";
+};
+
+&cam0 {
+	status = "okay";
+
+	port {
+		ov64b40_out: endpoint {
+			data-lanes = <1 2 3 4>;
+			link-frequencies = /bits/ 64 <849600000>;
+			remote-endpoint = <&seninf_csi2_in>;
+		};
+	};
+};
+
+&csi2_rx {
+	status = "okay";
+};
+
+&seninf {
+	phys = <&csi1_rx>, <&csi2_rx>;
+	phy-names = "csi1", "csi2";
+
+	ports {
+		port@2 {
+			reg = <2>;
+
+			seninf_csi2_in: endpoint {
+				data-lanes = <1 2 3 4>;
+				remote-endpoint = <&ov64b40_out>;
+			};
+		};
+
+		port@5 {
+			reg = <5>;
+
+			seninf_camsv2_out: endpoint {
+				remote-endpoint = <&camsv2_in>;
+			};
+		};
+	};
+};
+
+&camsv2 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			camsv2_in: endpoint {
+				remote-endpoint = <&seninf_camsv2_out>;
+			};
+		};
+	};
+};

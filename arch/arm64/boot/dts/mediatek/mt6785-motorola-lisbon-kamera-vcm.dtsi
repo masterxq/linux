@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): voice coil driver and EEPROM of the main camera module (OV64B40), on
+ * top of mt6785-motorola-lisbon-kamera.dtsi, which describes both nodes (disabled) and points the
+ * sensor at the voice coil driver (lens-focus).
+ *
+ *  - DW9800V at I2C2 0x0c, supplied by the AFVDD LDO switched by GPIO21. The vendor driver sets SAC
+ *    mode 1 (0x06 = 0x40) and the prescaler 0x07 = 0x6e. The dw9719 driver keeps it off under
+ *    runtime PM and parks the lens before cutting the supply.
+ *  - EEPROM at I2C2 0x50 with 16-bit offsets; the calibration layout ends at 0x1d1c, so the part
+ *    holds at least 64 kbit. The type is not known: the node uses the generic 24c64, read-only,
+ *    which reads the first 8 KiB of any larger 16-bit part just as well.
+ *  - Supplies: VCAMIO reaches the module connector; the EEPROM supply is assumed to be VCAMIO. I2C2
+ *    relies on the SoC pull-ups (bias-pull-up) and has no bus supply; it is not known whether the
+ *    voice coil driver can be reached with VCAMIO off.
+ */
+
+&cam0_afvdd {
+	status = "okay";
+};
+
+&cam0_vcm {
+	dongwoon,sac-mode = <1>;
+	dongwoon,vcm-prescale = <0x6e>;
+	status = "okay";
+};
+
+&i2c2 {
+	status = "okay";
+
+	eeprom@50 {
+		vcc-supply = <&mt6359_vcamio_ldo_reg>;
+		status = "okay";
+	};
+};

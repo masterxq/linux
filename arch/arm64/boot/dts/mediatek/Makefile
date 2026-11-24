@@ -24,6 +24,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-drm.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-gpu.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-drm-gpu.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-full.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-kamera.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-evb.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-sony-xperia-m5.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-evb.dtb
