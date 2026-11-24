@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_MEDIATEK_MDP_LINEAR
+	tristate "MediaTek firmware-free video detiler"
+	depends on VIDEO_DEV && HAS_DMA
+	depends on MTK_IOMMU || COMPILE_TEST
+	depends on MTK_MMSYS && MTK_CMDQ
+	select VIDEOBUF2_DMA_CONTIG
+	select V4L2_MEM2MEM_DEV
+	help
+	  Convert MT6785 decoder block layouts into linear NV12 or P010
+	  buffers through V4L2 mem2mem, with DMA-BUF import and export.
+	  No SCP firmware is used. The driver does not decode compressed
+	  video, scale images, or perform HDR tone mapping.
+
+	  The module is called mtk-mdp-linear.
