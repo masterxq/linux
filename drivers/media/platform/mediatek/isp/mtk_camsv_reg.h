@@ -33,7 +33,10 @@
 #define CAMSV_PAK_PAK_MODE_RAW_12			0x1
 #define CAMSV_PAK_PAK_MODE_RAW_10			0x2
 #define CAMSV_PAK_PAK_MODE_RAW_8			0x3
+#define CAMSV_PAK_PAK_MODE				GENMASK(1, 0)
 #define CAMSV_PAK_PAK_DBL_MODE_2_PIXELS			BIT(2)
+/* MT6785: mode in bits 2:0, pixels per clock in bits 5:4 */
+#define CAMSV_6785_PAK_PIX_MODE				GENMASK(5, 4)
 
 /* CAMSV_TG */
 #define CAMSV_TG_SEN_MODE				0x0010
@@ -42,6 +45,10 @@
 #define CAMSV_TG_SEN_GRAB_PXL				0x0018
 #define CAMSV_TG_SEN_GRAB_LIN				0x001c
 #define CAMSV_TG_PATH_CFG				0x0020
+/* MT8183/MT6785 (ISP 5.0): TG state, 1 = idle */
+#define CAMSV_5_TG_INTER_ST				0x004c
+#define CAMSV_5_TG_INTER_ST_STATE			GENMASK(13, 8)
+#define CAMSV_5_TG_INTER_ST_IDLE			1
 
 /* CAMSV_IMG0 */
 #define CAMSV_IMGO_SV_BASE_ADDR				0x0000
@@ -62,12 +69,17 @@
 #define CAMSV_IMGO_SV_CON2_FIFO_PREP_PRI_THRH_MASK	GENMASK(23, 16)
 #define CAMSV_IMGO_SV_CON2_FIFO_PREP_PRI_THRH_SHIFT	16
 
+/* MT6785 IMGO STRIDE: bus width in bytes - 1, and its enable */
+#define CAMSV_6785_IMGO_STRIDE_BUS_SIZE			GENMASK(18, 16)
+#define CAMSV_6785_IMGO_STRIDE_BUS_SIZE_EN		BIT(24)
+
 /* MT8183 (ISP5) IMGO sub-layout, offsets from the IMGO window (base + 0x20) */
 #define CAMSV_8183_IMGO_XSIZE				0x0010
 #define CAMSV_8183_IMGO_YSIZE				0x0014
 #define CAMSV_8183_IMGO_STRIDE				0x0018
 #define CAMSV_8183_IMGO_CON				0x001c
 #define CAMSV_8183_IMGO_CON2				0x0020
+#define CAMSV_8183_IMGO_CON3				0x0024
 
 #define CAMSV_TG_SEN_MODE_CMOS_EN			BIT(0)
 #define CAMSV_TG_VF_CON_VFDATA_EN			BIT(0)
@@ -87,6 +99,7 @@
 #define CAMSV_IRQ_TG_GBERR				BIT(5)
 #define CAMSV_IRQ_PASS1_DON				BIT(10)
 #define CAMSV_IRQ_IMGO_ERR				BIT(16)
+#define CAMSV_IRQ_IMGO_OVERR				BIT(17)
 
 /* FBC bits */
 #define CAMSV_IMGO_FBC_RCNT_INC				BIT(11)

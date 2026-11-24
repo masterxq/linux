@@ -6,6 +6,7 @@
  * Copyright (c) 2022 MediaTek Inc.
  */
 
+#include <linux/slab.h>
 #include <linux/version.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
@@ -39,260 +40,107 @@ to_mtk_cam_dev_buffer(struct vb2_buffer *buf)
  * Format Information
  */
 
-static struct mtk_cam_format_info mtk_cam_format_info[] = {
-	{
-		.fourcc = V4L2_PIX_FMT_SBGGR8,
-		.code = MEDIA_BUS_FMT_SBGGR8_1X8,
-		.bpp = 8,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_8
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_8,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGBRG8,
-		.code = MEDIA_BUS_FMT_SGBRG8_1X8,
-		.bpp = 8,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_8
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_8,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGRBG8,
-		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
-		.bpp = 8,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_8
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_8,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SRGGB8,
-		.code = MEDIA_BUS_FMT_SRGGB8_1X8,
-		.bpp = 8,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_8
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_8,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SBGGR10,
-		.code = MEDIA_BUS_FMT_SBGGR10_1X10,
-		.bpp = 10,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_10
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_10,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGBRG10,
-		.code = MEDIA_BUS_FMT_SGBRG10_1X10,
-		.bpp = 10,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_10
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_10,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGRBG10,
-		.code = MEDIA_BUS_FMT_SGRBG10_1X10,
-		.bpp = 10,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_10
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_10,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SRGGB10,
-		.code = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.bpp = 10,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_10
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_10,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SBGGR12,
-		.code = MEDIA_BUS_FMT_SBGGR12_1X12,
-		.bpp = 12,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_12
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_12,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGBRG12,
-		.code = MEDIA_BUS_FMT_SGBRG12_1X12,
-		.bpp = 12,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_12
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_12,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGRBG12,
-		.code = MEDIA_BUS_FMT_SGRBG12_1X12,
-		.bpp = 12,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_12
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_12,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SRGGB12,
-		.code = MEDIA_BUS_FMT_SRGGB12_1X12,
-		.bpp = 12,
-		.w_factor = 1,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,
-		.pak = CAMSV_PAK_PAK_MODE_RAW_12
-			| CAMSV_PAK_PAK_DBL_MODE_2_PIXELS,
-		.fmt_sel = CAMSV_FMT_SEL_TG1_FMT_RAW_12,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,
-	}, {
-		.fourcc = V4L2_PIX_FMT_UYVY,
-		.code = MEDIA_BUS_FMT_UYVY8_1X16,
-		.bpp = 16,
-		.w_factor = 2,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_SEL,
-		.pak = 0, /* ignored */
-		.fmt_sel = CAMSV_FMT_SEL_IMGO_BUS_SIZE_16
-			| CAMSV_FMT_SEL_TG1_FMT_YUV422,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_16,
-	}, {
-		.fourcc = V4L2_PIX_FMT_VYUY,
-		.code = MEDIA_BUS_FMT_VYUY8_1X16,
-		.bpp = 16,
-		.w_factor = 2,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_SEL,
-		.pak = 0, /* ignored */
-		.fmt_sel = CAMSV_FMT_SEL_IMGO_BUS_SIZE_16
-			| CAMSV_FMT_SEL_TG1_FMT_YUV422,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_16,
-	}, {
-		.fourcc = V4L2_PIX_FMT_YUYV,
-		.code = MEDIA_BUS_FMT_YUYV8_1X16,
-		.bpp = 16,
-		.w_factor = 2,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_SEL,
-		.pak = 0, /* ignored */
-		.fmt_sel = CAMSV_FMT_SEL_IMGO_BUS_SIZE_16
-			| CAMSV_FMT_SEL_TG1_FMT_YUV422,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_16,
-	}, {
-		.fourcc = V4L2_PIX_FMT_YVYU,
-		.code = MEDIA_BUS_FMT_YVYU8_1X16,
-		.bpp = 16,
-		.w_factor = 2,
-		.module_en_pak = CAMSV_MODULE_EN_PAK_SEL,
-		.pak = 0, /* ignored */
-		.fmt_sel = CAMSV_FMT_SEL_IMGO_BUS_SIZE_16
-			| CAMSV_FMT_SEL_TG1_FMT_YUV422,
-		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN
-			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_16,
-	},
+/*
+ * Bus code from the source and pixel format of the video node. A 10-bit
+ * Bayer source can be written as 8 bits (the packer keeps the 8 MSBs) or
+ * as MediaTek packed 10 bits; the pixel format of the video node selects
+ * the packer mode, the bus code the format of the TG. The first entry of a
+ * pixel format gives its bits per pixel.
+ */
+#define MTK_CAM_FMT_BAYER(_code, _fourcc, _bpp, _pak, _tg)		\
+	{								\
+		.code = _code,						\
+		.fourcc = _fourcc,					\
+		.bpp = _bpp,						\
+		.w_factor = 1,						\
+		.module_en_pak = CAMSV_MODULE_EN_PAK_EN,		\
+		.pak = _pak,						\
+		.fmt_sel = _tg,						\
+		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN		\
+			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_32,		\
+	}
+
+#define MTK_CAM_FMT_YUV(_code, _fourcc)					\
+	{								\
+		.code = _code,						\
+		.fourcc = _fourcc,					\
+		.bpp = 16,						\
+		.w_factor = 2,						\
+		.module_en_pak = CAMSV_MODULE_EN_PAK_SEL,		\
+		.pak = 0, /* ignored */					\
+		.fmt_sel = CAMSV_FMT_SEL_IMGO_BUS_SIZE_16		\
+			| CAMSV_FMT_SEL_TG1_FMT_YUV422,			\
+		.imgo_stride = CAMSV_IMGO_SV_STRIDE_BUS_SIZE_EN		\
+			| CAMSV_IMGO_SV_STRIDE_BUS_SIZE_16,		\
+	}
+
+#define MTK_CAM_PAK_8	(CAMSV_PAK_PAK_MODE_RAW_8 | CAMSV_PAK_PAK_DBL_MODE_2_PIXELS)
+#define MTK_CAM_PAK_12	(CAMSV_PAK_PAK_MODE_RAW_12 | CAMSV_PAK_PAK_DBL_MODE_2_PIXELS)
+
+static const struct mtk_cam_format_info mtk_cam_format_info[] = {
+	/* 8-bit sources */
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SBGGR8_1X8, V4L2_PIX_FMT_SBGGR8, 8,
+			  MTK_CAM_PAK_8, CAMSV_FMT_SEL_TG1_FMT_RAW_8),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGBRG8_1X8, V4L2_PIX_FMT_SGBRG8, 8,
+			  MTK_CAM_PAK_8, CAMSV_FMT_SEL_TG1_FMT_RAW_8),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGRBG8_1X8, V4L2_PIX_FMT_SGRBG8, 8,
+			  MTK_CAM_PAK_8, CAMSV_FMT_SEL_TG1_FMT_RAW_8),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SRGGB8_1X8, V4L2_PIX_FMT_SRGGB8, 8,
+			  MTK_CAM_PAK_8, CAMSV_FMT_SEL_TG1_FMT_RAW_8),
+	/* 10-bit sources, the 8 MSBs */
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SBGGR10_1X10, V4L2_PIX_FMT_SBGGR8, 8,
+			  CAMSV_PAK_PAK_MODE_RAW_8, CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGBRG10_1X10, V4L2_PIX_FMT_SGBRG8, 8,
+			  CAMSV_PAK_PAK_MODE_RAW_8, CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGRBG10_1X10, V4L2_PIX_FMT_SGRBG8, 8,
+			  CAMSV_PAK_PAK_MODE_RAW_8, CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SRGGB10_1X10, V4L2_PIX_FMT_SRGGB8, 8,
+			  CAMSV_PAK_PAK_MODE_RAW_8, CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	/* 10-bit sources, MediaTek packed */
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SBGGR10_1X10, V4L2_PIX_FMT_MTISP_SBGGR10,
+			  10, CAMSV_PAK_PAK_MODE_RAW_10,
+			  CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGBRG10_1X10, V4L2_PIX_FMT_MTISP_SGBRG10,
+			  10, CAMSV_PAK_PAK_MODE_RAW_10,
+			  CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGRBG10_1X10, V4L2_PIX_FMT_MTISP_SGRBG10,
+			  10, CAMSV_PAK_PAK_MODE_RAW_10,
+			  CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SRGGB10_1X10, V4L2_PIX_FMT_MTISP_SRGGB10,
+			  10, CAMSV_PAK_PAK_MODE_RAW_10,
+			  CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	/* 10-bit greyscale (phase detection pixels), MediaTek packed */
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_Y10_1X10, V4L2_PIX_FMT_MTISP_Y10,
+			  10, CAMSV_PAK_PAK_MODE_RAW_10,
+			  CAMSV_FMT_SEL_TG1_FMT_RAW_10),
+	/* 12-bit sources */
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SBGGR12_1X12, V4L2_PIX_FMT_SBGGR12, 12,
+			  MTK_CAM_PAK_12, CAMSV_FMT_SEL_TG1_FMT_RAW_12),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGBRG12_1X12, V4L2_PIX_FMT_SGBRG12, 12,
+			  MTK_CAM_PAK_12, CAMSV_FMT_SEL_TG1_FMT_RAW_12),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SGRBG12_1X12, V4L2_PIX_FMT_SGRBG12, 12,
+			  MTK_CAM_PAK_12, CAMSV_FMT_SEL_TG1_FMT_RAW_12),
+	MTK_CAM_FMT_BAYER(MEDIA_BUS_FMT_SRGGB12_1X12, V4L2_PIX_FMT_SRGGB12, 12,
+			  MTK_CAM_PAK_12, CAMSV_FMT_SEL_TG1_FMT_RAW_12),
+	/* YUV sources */
+	MTK_CAM_FMT_YUV(MEDIA_BUS_FMT_UYVY8_1X16, V4L2_PIX_FMT_UYVY),
+	MTK_CAM_FMT_YUV(MEDIA_BUS_FMT_VYUY8_1X16, V4L2_PIX_FMT_VYUY),
+	MTK_CAM_FMT_YUV(MEDIA_BUS_FMT_YUYV8_1X16, V4L2_PIX_FMT_YUYV),
+	MTK_CAM_FMT_YUV(MEDIA_BUS_FMT_YVYU8_1X16, V4L2_PIX_FMT_YVYU),
 };
 
-/* Pixel formats exposed on the video node, rebuilt by the out_mode fixup. */
-static u32 stream_out_fmts[ARRAY_SIZE(mtk_cam_format_info)];
-static unsigned int num_stream_out_fmts;
-
-static u32 bayer8_of(u32 code)
-{
-	switch (code) {
-	case MEDIA_BUS_FMT_SBGGR10_1X10: return V4L2_PIX_FMT_SBGGR8;
-	case MEDIA_BUS_FMT_SGBRG10_1X10: return V4L2_PIX_FMT_SGBRG8;
-	case MEDIA_BUS_FMT_SGRBG10_1X10: return V4L2_PIX_FMT_SGRBG8;
-	case MEDIA_BUS_FMT_SRGGB10_1X10: return V4L2_PIX_FMT_SRGGB8;
-	}
-	return 0;
-}
-
-static u32 bayer10p_of(u32 code)
-{
-	switch (code) {
-	case MEDIA_BUS_FMT_SBGGR10_1X10: return V4L2_PIX_FMT_SBGGR10P;
-	case MEDIA_BUS_FMT_SGBRG10_1X10: return V4L2_PIX_FMT_SGBRG10P;
-	case MEDIA_BUS_FMT_SGRBG10_1X10: return V4L2_PIX_FMT_SGRBG10P;
-	case MEDIA_BUS_FMT_SRGGB10_1X10: return V4L2_PIX_FMT_SRGGB10P;
-	}
-	return 0;
-}
-
-/*
- * The sensors on MT8183 boards only output 10-bit Bayer. What the camsv
- * writes to memory for it is chosen by out_mode:
- *  0: PAK RAW_8   -> 8-bit Bayer fourcc (8 MSBs)
- *  1: PAK RAW_10  -> 10-bit packed (advertised as *10P; the real layout is
- *                    MediaTek's LSB-first packing - for inspection only)
- *  2: PAK off     -> 16-bit little-endian Bayer (V4L2 *10)
- * 8-bit and YUV entries are left untouched. The 8-bit sensor-code entries
- * stay first, so fourcc lookups for 8-bit fourccs never hit a 10-bit entry;
- * the hardware is always configured from the sink pad bus code.
- */
-void mtk_cam_format_info_apply_out_mode(unsigned int out_mode)
-{
-	unsigned int i, j;
-
-	num_stream_out_fmts = 0;
-	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); i++) {
-		struct mtk_cam_format_info *info = &mtk_cam_format_info[i];
-
-		if (bayer8_of(info->code)) {
-			switch (out_mode) {
-			case 0:
-				info->fourcc = bayer8_of(info->code);
-				info->bpp = 8;
-				info->module_en_pak = CAMSV_MODULE_EN_PAK_EN;
-				info->pak = CAMSV_PAK_PAK_MODE_RAW_8;
-				break;
-			case 1:
-				info->fourcc = bayer10p_of(info->code);
-				info->bpp = 10;
-				info->module_en_pak = CAMSV_MODULE_EN_PAK_EN;
-				info->pak = CAMSV_PAK_PAK_MODE_RAW_10;
-				break;
-			default:
-				info->bpp = 16;
-				info->module_en_pak = 0;
-				info->pak = 0;
-				break;
-			}
-		}
-
-		for (j = 0; j < num_stream_out_fmts; j++)
-			if (stream_out_fmts[j] == info->fourcc)
-				break;
-		if (j == num_stream_out_fmts)
-			stream_out_fmts[num_stream_out_fmts++] = info->fourcc;
-	}
-}
+/* Pixel formats of the video node, each once, 8-bit Bayer first */
+static const u32 mtk_cam_stream_fmts[] = {
+	V4L2_PIX_FMT_SBGGR8, V4L2_PIX_FMT_SGBRG8,
+	V4L2_PIX_FMT_SGRBG8, V4L2_PIX_FMT_SRGGB8,
+	V4L2_PIX_FMT_MTISP_SBGGR10, V4L2_PIX_FMT_MTISP_SGBRG10,
+	V4L2_PIX_FMT_MTISP_SGRBG10, V4L2_PIX_FMT_MTISP_SRGGB10,
+	V4L2_PIX_FMT_MTISP_Y10,
+	V4L2_PIX_FMT_SBGGR12, V4L2_PIX_FMT_SGBRG12,
+	V4L2_PIX_FMT_SGRBG12, V4L2_PIX_FMT_SRGGB12,
+	V4L2_PIX_FMT_UYVY, V4L2_PIX_FMT_VYUY,
+	V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_YVYU,
+};
 
 static const struct mtk_cam_format_info *
 mtk_cam_format_info_by_fourcc(u32 fourcc)
@@ -310,20 +158,36 @@ mtk_cam_format_info_by_fourcc(u32 fourcc)
 	return NULL;
 }
 
+/**
+ * mtk_cam_format_info_find - the entry of a bus code and a pixel format
+ * @code: media bus code of the source
+ * @fourcc: pixel format of the video node
+ *
+ * Return: the entry, or NULL if the CAMSV cannot write @code as @fourcc.
+ */
 const struct mtk_cam_format_info *
-mtk_cam_format_info_by_code(u32 code)
+mtk_cam_format_info_find(u32 code, u32 fourcc)
 {
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); ++i) {
-		const struct mtk_cam_format_info *info =
-			&mtk_cam_format_info[i];
-
-		if (info->code == code)
-			return info;
-	}
+	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); ++i)
+		if (mtk_cam_format_info[i].code == code &&
+		    mtk_cam_format_info[i].fourcc == fourcc)
+			return &mtk_cam_format_info[i];
 
 	return NULL;
+}
+
+/* the first entry of each bus code counts for the enumeration */
+static bool mtk_cam_format_info_first_of_code(unsigned int idx)
+{
+	unsigned int i;
+
+	for (i = 0; i < idx; ++i)
+		if (mtk_cam_format_info[i].code == mtk_cam_format_info[idx].code)
+			return false;
+
+	return true;
 }
 
 static bool mtk_cam_dev_find_fmt(const struct mtk_cam_vdev_desc *desc,
@@ -353,15 +217,16 @@ static void calc_bpl_size_pix_mp(const struct mtk_cam_format_info *fmtinfo,
 	}
 }
 
-static void mtk_cam_dev_load_default_fmt(struct mtk_cam_dev *cam)
+static void mtk_cam_dev_load_default_fmt(struct mtk_cam_dev *cam,
+					 struct mtk_cam_video_device *vdev)
 {
-	struct mtk_cam_video_device *vdev = &cam->vdev;
 	struct v4l2_pix_format_mplane *fmt = &vdev->format;
 
 	fmt->num_planes = MAX_SUPPORTED_NUM_PLANES;
-	fmt->pixelformat = vdev->desc->fmts[0];
-	fmt->width = IMG_MAX_WIDTH;
-	fmt->height = IMG_MAX_HEIGHT;
+	fmt->pixelformat = mtk_cam_dev_find_fmt(vdev->desc, cam->default_fmt) ?
+			   cam->default_fmt : vdev->desc->fmts[0];
+	fmt->width = IMG_DEF_WIDTH;
+	fmt->height = IMG_DEF_HEIGHT;
 
 	fmt->colorspace = V4L2_COLORSPACE_SRGB;
 	fmt->field = V4L2_FIELD_NONE;
@@ -392,10 +257,15 @@ static int mtk_cam_vb2_queue_setup(struct vb2_queue *vq,
 
 	size = fmt->plane_fmt[0].sizeimage;
 
+	/*
+	 * VIDIOC_CREATE_BUFS: at least the current format, at most twice the
+	 * largest frame the node can capture.
+	 */
 	if (*num_planes == 0) {
 		*num_planes = MAX_SUPPORTED_NUM_PLANES;
 		sizes[0] = size;
-	} else if (*num_planes != MAX_SUPPORTED_NUM_PLANES || sizes[0] < size) {
+	} else if (*num_planes != MAX_SUPPORTED_NUM_PLANES || sizes[0] < size ||
+		   sizes[0] > 2 * IMG_MAX_SIZEIMAGE) {
 		return -EINVAL;
 	}
 
@@ -411,13 +281,14 @@ static int mtk_cam_vb2_buf_prepare(struct vb2_buffer *vb)
 	struct mtk_cam_dev *cam = vb2_get_drv_priv(vb->vb2_queue);
 	struct mtk_cam_dev_buffer *buf = to_mtk_cam_dev_buffer(vb);
 	const struct v4l2_pix_format_mplane *fmt = &vdev->format;
+	dma_addr_t daddr;
 	u32 size;
 	unsigned int i;
 
 	for (i = 0; i < vb->num_planes; i++) {
 		size = fmt->plane_fmt[i].sizeimage;
 		if (vb2_plane_size(vb, i) < size) {
-			dev_err(cam->dev, "plane size is too small:%lu<%u\n",
+			dev_dbg(cam->dev, "plane size is too small:%lu<%u\n",
 				vb2_plane_size(vb, i), size);
 			return -EINVAL;
 		}
@@ -430,8 +301,16 @@ static int mtk_cam_vb2_buf_prepare(struct vb2_buffer *vb)
 		vb2_set_plane_payload(vb, i, size);
 	}
 
-	if (!buf->daddr)
-		buf->daddr = vb2_dma_contig_plane_dma_addr(vb, 0);
+	/*
+	 * Every time: an imported DMABUF can be another one at each QBUF.
+	 * The address register of the DMA has 32 bits.
+	 */
+	daddr = vb2_dma_contig_plane_dma_addr(vb, 0);
+	if (upper_32_bits(daddr + vb2_plane_size(vb, 0) - 1)) {
+		dev_dbg(cam->dev, "buffer above 4 GiB\n");
+		return -EINVAL;
+	}
+	buf->daddr = daddr;
 
 	return 0;
 }
@@ -487,41 +366,74 @@ static int mtk_cam_vb2_start_streaming(struct vb2_queue *vq,
 		vb2_queue_to_mtk_cam_video_device(vq);
 	struct device *dev = cam->dev;
 	const struct v4l2_pix_format_mplane *fmt = &vdev->format;
+	const struct mtk_cam_format_info *fmtinfo;
+	const struct v4l2_mbus_framefmt *src;
 	struct v4l2_subdev_state *state;
-	u32 code;
+	u32 code, width, height;
 	int ret;
 
 	/* Configure the hardware from the bus code actually received. */
 	state = v4l2_subdev_lock_and_get_active_state(&cam->subdev);
 	code = v4l2_subdev_state_get_format(state, MTK_CAM_CIO_PAD_SENINF)->code;
+	src = v4l2_subdev_state_get_format(state, MTK_CAM_CIO_PAD_VIDEO);
+	width = src->width;
+	height = src->height;
 	v4l2_subdev_unlock_state(state);
-	if (!mtk_cam_format_info_by_code(code))
-		code = vdev->fmtinfo->code;
 
-	ret = mtk_camsv_scratch_alloc(cam, fmt->plane_fmt[0].sizeimage);
-	if (ret) {
-		mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
-		return ret;
+	/*
+	 * Validate the pipeline before the hardware is touched: a grab window
+	 * that does not match the frames coming in only produces TG and IMGO
+	 * error interrupts. The pixel format has to be one the CAMSV can
+	 * write the bus code as; it selects the packer mode.
+	 */
+	if (fmt->width != width || fmt->height != height) {
+		dev_dbg(dev, "video format %ux%u does not match the source pad %ux%u\n",
+			fmt->width, fmt->height, width, height);
+		ret = -EPIPE;
+		goto fail_return;
 	}
+	fmtinfo = mtk_cam_format_info_find(code, fmt->pixelformat);
+	if (!fmtinfo) {
+		dev_dbg(dev, "bus code 0x%04x cannot be written as %p4cc\n",
+			code, &fmt->pixelformat);
+		ret = -EPIPE;
+		goto fail_return;
+	}
+
+	/*
+	 * CAMSVs fed by streams of the same seninf input (image and phase
+	 * detection data of one sensor) share the sensor and the seninf sink,
+	 * so they have to share the pipeline: the first start populates it
+	 * with every pad reached through active routes, which includes the
+	 * video pads of the other CAMSVs, and a later start joins it.
+	 */
+	ret = video_device_pipeline_alloc_start(&vdev->vdev);
+	if (ret)
+		goto fail_return;
+
+	ret = mtk_camsv_pixel_mode(cam);
+	if (ret)
+		goto fail_pipeline;
+
+	mtk_camsv_scratch_alloc(cam, fmt->plane_fmt[0].sizeimage);
 
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret) {
 		dev_err(dev, "failed to get pm_runtime\n");
-		mtk_camsv_scratch_free(cam);
-		mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
-		return ret;
+		goto fail_scratch;
 	}
 
-	mtk_camsv_setup(cam, count, fmt->width, fmt->height,
-			fmt->plane_fmt[0].bytesperline, code);
+	/* kept for the restart after a system sleep */
+	cam->stream_fmtinfo = fmtinfo;
+	cam->stream_width = fmt->width;
+	cam->stream_height = fmt->height;
+	cam->stream_bpl = fmt->plane_fmt[0].bytesperline;
+
+	mtk_camsv_setup(cam, count, cam->stream_width, cam->stream_height,
+			cam->stream_bpl, fmtinfo);
 
 	/* Enable CMOS and VF */
 	mtk_camsv_cmos_vf_hw_enable(cam);
-
-	/* Start streaming of the whole pipeline now. */
-	ret = video_device_pipeline_start(&vdev->vdev, &cam->pipeline);
-	if (ret)
-		goto fail_pm_put;
 
 	cam->sequence = (unsigned int)-1;
 
@@ -530,19 +442,22 @@ static int mtk_cam_vb2_start_streaming(struct vb2_queue *vq,
 					 cam->subdev_pads[MTK_CAM_CIO_PAD_VIDEO].index,
 					 BIT(0));
 	if (ret)
-		goto fail_no_stream;
+		goto fail_hw;
+
+	cam->streaming = true;
 
 	return 0;
 
-fail_no_stream:
-	video_device_pipeline_stop(&vdev->vdev);
-	mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
-fail_pm_put:
+fail_hw:
 	mtk_camsv_cmos_vf_hw_disable(cam);
-	mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
 	pm_runtime_mark_last_busy(cam->dev);
 	pm_runtime_put_autosuspend(cam->dev);
+fail_scratch:
 	mtk_camsv_scratch_free(cam);
+fail_pipeline:
+	video_device_pipeline_stop(&vdev->vdev);
+fail_return:
+	mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
 
 	return ret;
 }
@@ -553,12 +468,19 @@ static void mtk_cam_vb2_stop_streaming(struct vb2_queue *vq)
 	struct mtk_cam_video_device *vdev =
 		vb2_queue_to_mtk_cam_video_device(vq);
 
+	cam->streaming = false;
+
 	/* Disable CMOS and VF */
 	mtk_camsv_cmos_vf_hw_disable(cam);
 
-	v4l2_subdev_disable_streams(&cam->subdev,
-				    cam->subdev_pads[MTK_CAM_CIO_PAD_VIDEO].index,
-				    BIT(0));
+	/*
+	 * The queue can be released from the unbind path; once the subdev
+	 * has left the media graph there is no pipeline left to stop.
+	 */
+	if (cam->subdev.entity.graph_obj.mdev)
+		v4l2_subdev_disable_streams(&cam->subdev,
+					    cam->subdev_pads[MTK_CAM_CIO_PAD_VIDEO].index,
+					    BIT(0));
 
 	mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_ERROR);
 
@@ -575,8 +497,6 @@ static const struct vb2_ops mtk_cam_vb2_ops = {
 	.buf_queue = mtk_cam_vb2_buf_queue,
 	.start_streaming = mtk_cam_vb2_start_streaming,
 	.stop_streaming = mtk_cam_vb2_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 };
 
 /* -----------------------------------------------------------------------------
@@ -594,8 +514,8 @@ static int mtk_cam_init_state(struct v4l2_subdev *sd,
 {
 	static const struct v4l2_mbus_framefmt def_format = {
 		.code = MEDIA_BUS_FMT_SGRBG10_1X10,
-		.width = IMG_MAX_WIDTH,
-		.height = IMG_MAX_HEIGHT,
+		.width = IMG_DEF_WIDTH,
+		.height = IMG_DEF_HEIGHT,
 		.field = V4L2_FIELD_NONE,
 		.colorspace = V4L2_COLORSPACE_SRGB,
 		.xfer_func = V4L2_XFER_FUNC_DEFAULT,
@@ -617,12 +537,18 @@ static int mtk_cam_enum_mbus_code(struct v4l2_subdev *sd,
 				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_mbus_code_enum *code)
 {
-	if (code->index >= ARRAY_SIZE(mtk_cam_format_info))
-		return -EINVAL;
+	unsigned int i, n = 0;
 
-	code->code = mtk_cam_format_info[code->index].code;
+	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); ++i) {
+		if (!mtk_cam_format_info_first_of_code(i))
+			continue;
+		if (n++ == code->index) {
+			code->code = mtk_cam_format_info[i].code;
+			return 0;
+		}
+	}
 
-	return 0;
+	return -EINVAL;
 }
 
 static int mtk_cam_set_fmt(struct v4l2_subdev *sd,
@@ -634,10 +560,14 @@ static int mtk_cam_set_fmt(struct v4l2_subdev *sd,
 
 	/*
 	 * We only support pass-through mode, the format on source pads can't
-	 * be modified.
+	 * be modified: report the propagated one.
 	 */
 	if (fmt->pad != MTK_CAM_CIO_PAD_SENINF)
-		return -EINVAL;
+		return v4l2_subdev_get_fmt(sd, sd_state, fmt);
+
+	/* start_streaming() configured the hardware from the active format */
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE && v4l2_subdev_is_streaming(sd))
+		return -EBUSY;
 
 	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); ++i) {
 		if (mtk_cam_format_info[i].code == fmt->format.code)
@@ -665,32 +595,45 @@ static int mtk_cam_set_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+/*
+ * The seninf (which owns the v4l2_device) has bound us. The sub-device and
+ * its device node hold the CAMSV until mtk_cam_subdev_release().
+ */
 static int mtk_cam_subdev_registered(struct v4l2_subdev *sd)
 {
 	struct mtk_cam_dev *cam = to_mtk_cam_dev(sd);
-
 	int ret;
 
 	/* Create the video device and link. */
 	ret = mtk_cam_video_register(cam);
-	if (!ret)
-		cam->vdev_registered = true;
-	return ret;
+	if (ret)
+		return ret;
+
+	mtk_cam_dev_get(cam);
+	return 0;
 }
 
 /*
- * Called when the seninf (which owns the v4l2_device) unbinds us: drop the
- * video node too, so a later re-bind does not register it twice.
+ * Called when the seninf unbinds us or the CAMSV goes (always under the
+ * list lock of v4l2-async): drop the video node too, a later bind
+ * registers a new one.
  */
 static void mtk_cam_subdev_unregistered(struct v4l2_subdev *sd)
 {
 	struct mtk_cam_dev *cam = to_mtk_cam_dev(sd);
 
-	if (cam->vdev_registered) {
-		mtk_cam_video_unregister(&cam->vdev);
-		cam->vdev_registered = false;
-	}
+	mtk_cam_video_unregister(cam);
 	cam->seninf = NULL;
+}
+
+/*
+ * The device node of the sub-device is gone, after its last open file. The
+ * V4L2 core still writes to the sub-device after this callback, so the
+ * reference may not go here: it goes from the workqueue of the driver.
+ */
+static void mtk_cam_subdev_release(struct v4l2_subdev *sd)
+{
+	mtk_cam_dev_put_deferred(to_mtk_cam_dev(sd));
 }
 
 static int camsv_enable_streams(struct v4l2_subdev *sd,
@@ -732,17 +675,20 @@ static int camsv_disable_streams(struct v4l2_subdev *sd,
 	struct v4l2_subdev *seninf;
 	int ret;
 
-	if (cam->seninf) {
+	if (cam->seninf && cam->seninf->entity->graph_obj.mdev) {
 		seninf = media_entity_to_v4l2_subdev(cam->seninf->entity);
 		ret = v4l2_subdev_disable_streams(seninf, cam->seninf->index,
 						  BIT(0));
-		if (ret) {
-			dev_err(cam->dev, "failed to stream off %s:%d\n",
-				sd->entity.name, ret);
-			return ret;
-		}
+		if (ret)
+			dev_err(cam->dev, "failed to stream off %s:%u: %d\n",
+				seninf->entity.name, cam->seninf->index, ret);
 	}
 
+	/*
+	 * The CAMSV is stopped (stop_streaming() switched it off before): an
+	 * error here would leave it enabled for the V4L2 core, and its next
+	 * start would fail with -EALREADY.
+	 */
 	return 0;
 }
 
@@ -763,6 +709,7 @@ static const struct v4l2_subdev_internal_ops mtk_cam_internal_ops = {
 	.init_state = mtk_cam_init_state,
 	.registered = mtk_cam_subdev_registered,
 	.unregistered = mtk_cam_subdev_unregistered,
+	.release = mtk_cam_subdev_release,
 };
 
 /* -----------------------------------------------------------------------------
@@ -818,16 +765,31 @@ static int mtk_cam_v4l2_register(struct mtk_cam_dev *cam)
 	return 0;
 }
 
+/*
+ * Unregistering the sub-device from the seninf unregisters the video node
+ * (mtk_cam_subdev_unregistered()); a stream stops there. Open files keep
+ * the nodes, which answer -ENODEV from now on, and the structure.
+ */
 static void mtk_cam_v4l2_unregister(struct mtk_cam_dev *cam)
 {
-	if (cam->vdev_registered) {
-		mtk_cam_video_unregister(&cam->vdev);
-		cam->vdev_registered = false;
-	}
-
-	media_entity_cleanup(&cam->subdev.entity);
 	v4l2_async_unregister_subdev(&cam->subdev);
 	v4l2_subdev_cleanup(&cam->subdev);
+	media_entity_cleanup(&cam->subdev.entity);
+}
+
+static void mtk_cam_dev_release(struct kref *kref)
+{
+	kfree(container_of(kref, struct mtk_cam_dev, kref));
+}
+
+void mtk_cam_dev_get(struct mtk_cam_dev *cam)
+{
+	kref_get(&cam->kref);
+}
+
+void mtk_cam_dev_put(struct mtk_cam_dev *cam)
+{
+	kref_put(&cam->kref, mtk_cam_dev_release);
 }
 
 int mtk_cam_dev_init(struct mtk_cam_dev *cam_dev)
@@ -861,7 +823,7 @@ static int mtk_cam_vidioc_enum_fmt(struct file *file, void *fh,
 {
 	struct mtk_cam_video_device *vdev = file_to_mtk_cam_video_device(file);
 	const struct mtk_cam_format_info *fmtinfo;
-	unsigned int i;
+	unsigned int i, n = 0;
 
 	/* If mbus_code is not set enumerate all supported formats. */
 	if (!f->mbus_code) {
@@ -876,18 +838,15 @@ static int mtk_cam_vidioc_enum_fmt(struct file *file, void *fh,
 	}
 
 	/*
-	 * Otherwise only enumerate supported pixel formats corresponding to
-	 * that bus code.
+	 * Otherwise only enumerate the pixel formats the bus code can be
+	 * written as: 8 bits and MediaTek packed for 10-bit Bayer.
 	 */
-	if (f->index)
-		return -EINVAL;
-
-	fmtinfo = mtk_cam_format_info_by_code(f->mbus_code);
-	if (!fmtinfo)
-		return -EINVAL;
-
-	for (i = 0; i < vdev->desc->num_fmts; ++i) {
-		if (vdev->desc->fmts[i] == fmtinfo->fourcc) {
+	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); ++i) {
+		fmtinfo = &mtk_cam_format_info[i];
+		if (fmtinfo->code != f->mbus_code ||
+		    !mtk_cam_dev_find_fmt(vdev->desc, fmtinfo->fourcc))
+			continue;
+		if (n++ == f->index) {
 			f->pixelformat = fmtinfo->fourcc;
 			f->flags = 0;
 			return 0;
@@ -997,6 +956,7 @@ static const struct v4l2_ioctl_ops mtk_cam_v4l2_vcap_ioctl_ops = {
 };
 
 static const struct v4l2_file_operations mtk_cam_v4l2_fops = {
+	.owner = THIS_MODULE,
 	.unlocked_ioctl = video_ioctl2,
 	.open = v4l2_fh_open,
 	.release = vb2_fop_release,
@@ -1012,8 +972,9 @@ static const struct v4l2_file_operations mtk_cam_v4l2_fops = {
  */
 
 
-static struct mtk_cam_vdev_desc video_stream = {
-	.fmts = stream_out_fmts,
+static const struct mtk_cam_vdev_desc video_stream = {
+	.fmts = mtk_cam_stream_fmts,
+	.num_fmts = ARRAY_SIZE(mtk_cam_stream_fmts),
 	.frmsizes =
 		&(struct v4l2_frmsizeenum){
 			.index = 0,
@@ -1029,30 +990,45 @@ static struct mtk_cam_vdev_desc video_stream = {
 		},
 };
 
+/* The last open file of the node is gone, after its unregistration */
+static void mtk_cam_video_release(struct video_device *vdev)
+{
+	struct mtk_cam_video_device *node =
+		container_of(vdev, struct mtk_cam_video_device, vdev);
+	struct mtk_cam_dev *cam = node->cam;
+
+	media_entity_cleanup(&vdev->entity);
+	mutex_destroy(&node->vdev_lock);
+	kfree(node);
+	mtk_cam_dev_put(cam);
+}
+
 int mtk_cam_video_register(struct mtk_cam_dev *cam)
 {
 	struct device *dev = cam->dev;
-	struct mtk_cam_video_device *cam_vdev = &cam->vdev;
-	struct video_device *vdev = &cam_vdev->vdev;
-	struct vb2_queue *vbq = &cam_vdev->vbq;
+	struct mtk_cam_video_device *cam_vdev;
+	struct video_device *vdev;
+	struct vb2_queue *vbq;
 	int ret;
 
 	vb2_dma_contig_set_max_seg_size(cam->dev, DMA_BIT_MASK(32));
 
 	/*
-	 * The video node is (re-)registered every time the seninf binds us;
-	 * an embedded video_device must start from a clean state each time
-	 * (its struct device kobject cannot be initialised twice).
+	 * A new node each time the seninf binds us: the node of an earlier
+	 * bind can still be open, and stays until its release.
 	 */
-	memset(vdev, 0, sizeof(*vdev));
-	memset(vbq, 0, sizeof(*vbq));
+	cam_vdev = kzalloc_obj(*cam_vdev);
+	if (!cam_vdev)
+		return -ENOMEM;
+	cam_vdev->cam = cam;
 	mutex_init(&cam_vdev->vdev_lock);
+	vdev = &cam_vdev->vdev;
+	vbq = &cam_vdev->vbq;
 
-	video_stream.num_fmts = num_stream_out_fmts;
 	cam_vdev->desc = &video_stream;
 
 	/* Initialize mtk_cam_video_device */
-	mtk_cam_dev_load_default_fmt(cam);
+	mtk_cam_dev_load_default_fmt(cam, cam_vdev);
 
 	cam_vdev->vdev_pad.flags = MEDIA_PAD_FL_SOURCE;
 
@@ -1060,7 +1036,7 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 	ret = media_entity_pads_init(&vdev->entity, 1, &cam_vdev->vdev_pad);
 	if (ret) {
 		dev_err(dev, "failed to initialize media pad:%d\n", ret);
-		return ret;
+		goto fail_free;
 	}
 	cam_vdev->vdev_pad.flags = MEDIA_PAD_FL_SINK;
 
@@ -1071,6 +1047,12 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 	vbq->mem_ops = &vb2_dma_contig_memops;
 	vbq->buf_struct_size = sizeof(struct mtk_cam_dev_buffer);
 	/*
+	 * Large frames need large physically contiguous buffers: when CMA
+	 * cannot provide one the allocation fails with -ENOMEM, without the
+	 * page allocator warning about the order.
+	 */
+	vbq->gfp_flags = __GFP_NOWARN;
+	/*
 	 * TODO: The hardware supports SOF interrupts, switch to a SOF
 	 * timestamp source would give better accuracy, but first requires
 	 * extending the V4L2 API to support it.
@@ -1078,8 +1060,11 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 	vbq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC
 			     | V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
 
-	/* No minimum buffers limitation */
-	vbq->min_queued_buffers = 0;
+	/*
+	 * Without FBC the DMA needs a buffer from the start: the scratch
+	 * buffer is optional (CMA), so start with one queued buffer.
+	 */
+	vbq->min_queued_buffers = cam->conf->has_fbc ? 0 : 1;
 	vbq->drv_priv = cam;
 
 	vbq->lock = &cam_vdev->vdev_lock;
@@ -1098,6 +1083,11 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 			  | V4L2_CAP_IO_MC;
 	vdev->ioctl_ops = &mtk_cam_v4l2_vcap_ioctl_ops;
 	vdev->fops = &mtk_cam_v4l2_fops;
+	/*
+	 * The release of the node frees it, but only once it is registered:
+	 * a failed registration can end in the release or not, depending on
+	 * the step that failed.
+	 */
 	vdev->release = video_device_release_empty;
 	vdev->lock = &cam_vdev->vdev_lock;
 	vdev->v4l2_dev = cam->subdev.v4l2_dev;
@@ -1107,7 +1097,6 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 	video_set_drvdata(vdev, cam);
 
 	/* Initialize miscellaneous variables */
-	mutex_init(&cam_vdev->vdev_lock);
 	INIT_LIST_HEAD(&cam->buf_list);
 
 	ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
@@ -1115,6 +1104,8 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 		dev_err(dev, "failed to register vde:%d\n", ret);
 		goto fail_vb2_rel;
 	}
+	mtk_cam_dev_get(cam);
+	vdev->release = mtk_cam_video_release;
 
 	/* Create link between the video pad and the subdev pad. */
 	ret = media_create_pad_link(&cam->subdev.entity,
@@ -1122,27 +1113,57 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 				    &vdev->entity, 0,
 				    MEDIA_LNK_FL_IMMUTABLE
 				    | MEDIA_LNK_FL_ENABLED);
-	if (ret)
-		goto fail_vdev_ureg;
+	if (ret) {
+		/* the release frees the node */
+		vb2_video_unregister_device(vdev);
+		return ret;
+	}
+
+	cam->vdev = cam_vdev;
 
 	return 0;
 
-fail_vdev_ureg:
-	video_unregister_device(vdev);
 fail_vb2_rel:
-	mutex_destroy(&cam_vdev->vdev_lock);
 	vb2_queue_release(vbq);
 fail_media_clean:
 	media_entity_cleanup(&vdev->entity);
+fail_free:
+	mutex_destroy(&cam_vdev->vdev_lock);
+	kfree(cam_vdev);
 
 	return ret;
 }
 
-void mtk_cam_video_unregister(struct mtk_cam_video_device *vdev)
+/*
+ * The node answers -ENODEV from now on, also to files that stay open. A
+ * stream stops here: the buffers of the driver go back with an error, and
+ * the queue lets its buffers go.
+ *
+ * The V4L2 core keeps the entity of the node, with the link to its device
+ * node interface, in the media graph until the last open file is released
+ * (v4l2_device_release()). Until then the graph would show an entity whose
+ * device node no longer exists, next to the one of a later bind, and
+ * libcamera waits for that device node and drops the whole media device
+ * (no camera at all). A process that keeps the node open (a camera manager
+ * in the session) would make this last until it ends. Take the entity out
+ * of the graph here instead; the stream has stopped above, so no pipeline
+ * uses it any more. Only the device node interface without links stays
+ * until the release, and the core skips the entity there (it is no longer
+ * part of a media device). Without open files the release comes with the
+ * unregistration: hold the node until the entity is out.
+ */
+void mtk_cam_video_unregister(struct mtk_cam_dev *cam)
 {
-	video_unregister_device(&vdev->vdev);
-	vb2_queue_release(&vdev->vbq);
-	media_entity_cleanup(&vdev->vdev.entity);
-	mutex_destroy(&vdev->vdev_lock);
-	vb2_dma_contig_clear_max_seg_size(&vdev->vdev.dev);
+	struct mtk_cam_video_device *cam_vdev = cam->vdev;
+	struct video_device *vdev;
+
+	if (!cam_vdev)
+		return;
+
+	cam->vdev = NULL;
+	vdev = &cam_vdev->vdev;
+	get_device(&vdev->dev);
+	vb2_video_unregister_device(vdev);
+	media_device_unregister_entity(&vdev->entity);
+	put_device(&vdev->dev);
 }
