@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): EEPROM of the front camera module (OV16A1Q), on top of
+ * mt6785-motorola-lisbon-kamera.dtsi, which describes the node (disabled).
+ *
+ *  - EEPROM at I2C4 0x51 with 16-bit offsets; the calibration layout is 0x18f3 bytes long (white
+ *    balance, lens shading). The type is not known: the node uses the generic 24c64, read-only,
+ *    like the EEPROM of the main camera module.
+ *  - Supply: assumed to be VCAMIO like the main camera module. With a wrong supply the read at
+ *    probe fails and no device appears; the sensor is not affected.
+ *  - The module has no voice coil: fixed focus.
+ */
+
+&i2c4 {
+	eeprom@51 {
+		vcc-supply = <&mt6359_vcamio_ldo_reg>;
+		status = "okay";
+	};
+};

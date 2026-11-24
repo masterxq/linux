@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): the ISP power domain with the clocks its power-on and power-off
+ * sequences need, the ISP pass 2 (DIP), the multi-frame blending block (MFB) and CAMSV3 for the
+ * phase detection data. DIP and MFB write through the IOMMU (larb5, lisbon-iommu.dtsi), like the
+ * CAMSVs. The domain stays off until the DIP or the MFB driver powers it for its jobs.
+ */
+
+/*
+ * The imgsys clock controller is switched off in lisbon-common; the ISP domain below takes two of
+ * its gates. It has no power domain of its own and does not touch the hardware unless one of its
+ * gates is switched, which happens only while the ISP domain is on.
+ */
+&imgsys {
+	status = "okay";
+};
+
+/*
+ * The ISP domain sits below MM like the CAM domain, and its power-on sequence releases the SMI
+ * clamp in the SMI common registers. lisbon takes MM over from lk (keep-boot-state in
+ * lisbon-pd.dtsi), so nothing holds the MM bus clock once the display is off. The vendor kernel
+ * has the ISP power gate below the display power gate, which holds mm_sel. As for CAM in
+ * lisbon-kamera.dtsi: the ISP domain takes top_mm before its power-on sequence and keeps it while
+ * it is on.
+ *
+ * The first bus protection step of the power-off (TOPAXI_MM bits 3 and 8) is only acknowledged
+ * while IMGSYS larb gates are open: with all IMGSYS gates closed neither bit acknowledges, with
+ * the larb5 gate open bit 3 does, with the larb4 gate open bit 8 does. The vendor power-on opens
+ * larb5 and larb4, and its clock driver never closes them. As on MT8183, the domain holds them as
+ * subsys clocks: opened after the bus protection is released, closed after the protection is set
+ * and the SRAM is down.
+ *
+ * The power controller gets these clocks when it probes, so it cannot probe without the imgsys
+ * clock provider: the imgsys clock driver (COMMON_CLK_MT6785_IMG) has to be built in wherever this
+ * file is part of the DTB, or no power domain is registered at all.
+ */
+&{/soc/syscon@10006000/power-controller/power-domain@11/power-domain@3} {
+	clocks = <&topckgen CLK_TOP_MM>, <&topckgen CLK_TOP_IMG>,
+		 <&imgsys CLK_IMG_LARB5>, <&imgsys CLK_IMG_LARB4>;
+	clock-names = "mm", "isp", "isp-0", "isp-1";
+};
+
+/* ISP pass 2 (DIP): memory-to-memory processing of raw frames, driver mtk-dip-mt6785 (a module) */
+&dip {
+	status = "okay";
+};
+
+/*
+ * Multi-frame blending (MFB): memory-to-memory blending of the NV12 frames the DIP writes,
+ * driver mtk-mfb-mt6785 (a module)
+ */
+&mfb {
+	status = "okay";
+};
+
+/*
+ * Phase detection data of the main camera: the OV64B40 sends it on virtual
+ * channel 1 next to the image. SENINF output port 6 feeds CAM mux 4 and
+ * CAMSV3, as in the vendor camera software. The default routing of the
+ * SENINF leaves the port without a route; a user routes stream 1 of the main
+ * camera input (port 2) to it.
+ */
+&seninf {
+	ports {
+		port@6 {
+			reg = <6>;
+
+			seninf_camsv3_out: endpoint {
+				remote-endpoint = <&camsv3_in>;
+			};
+		};
+	};
+};
+
+&camsv3 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			camsv3_in: endpoint {
+				remote-endpoint = <&seninf_camsv3_out>;
+			};
+		};
+	};
+};

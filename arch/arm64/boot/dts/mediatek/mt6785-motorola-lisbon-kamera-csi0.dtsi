@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): receive path of CSI0, on top of mt6785-motorola-lisbon-kamera.dtsi
+ * and mt6785-motorola-lisbon-isp.dtsi: the CSI0 receiver, SENINF input port 0 and CAMSV4 behind
+ * SENINF output port 7.
+ *
+ *  - CSI0 sits behind the MIPI switch (GPIO72). Position 0 connects the S5K5E9 (macro camera) with
+ *    two data lanes on the A half of the port (2D1C: data on A lanes 0 and 2, clock on A lane 1),
+ *    position 1 the S5K4H7 (ultra wide camera) with four lanes over both halves (4D1C). The
+ *    sensors select the position themselves (mux-states) while they stream, so they stream one
+ *    at a time. Both are enabled together with what they need: their bus I2C7, the AVDD and DVDD
+ *    LDOs they share and the switch. The power-down line of the depth camera stays low (pinctrl
+ *    hog in lisbon-cam-off), so the shared supplies do not wake it.
+ *  - The input port has one endpoint per sensor: endpoint 0 the macro camera, endpoint 1 the ultra
+ *    wide camera. One media link is enabled at a time, the one of the macro camera by default;
+ *    user space moves it to the camera it starts. The lane count follows the linked sensor.
+ *  - The PHY takes the mode from the number of data lanes the SENINF configures: 2D1C on the A
+ *    half for one or two lanes, 4D1C for four.
+ *  - The SENINF routes CSI0 to output port 7 whatever else is connected (fixed default routes of
+ *    the MT6785): the front and main camera keep ports 4 and 5, port 6 stays free for the phase
+ *    detection data of the main camera.
+ *  - Output port 7 is MUX3 -> CAM mux 5 -> CAMSV4, continuing CAMSV1..3 on CAM mux 2..4.
+ *    CAMSV4 writes through the IOMMU like CAMSV1..3 (larb6 port SOC1, shared with CAMSV3).
+ */
+
+&csi0_rx {
+	status = "okay";
+};
+
+&cam246_avdd {
+	status = "okay";
+};
+
+&cam46_dvdd {
+	status = "okay";
+};
+
+&cam_mipi_switch {
+	status = "okay";
+};
+
+&i2c7 {
+	status = "okay";
+};
+
+&cam6 {
+	status = "okay";
+};
+
+&s5k5e9_out {
+	remote-endpoint = <&seninf_csi0_macro_in>;
+};
+
+&cam4 {
+	status = "okay";
+};
+
+&s5k4h7_out {
+	remote-endpoint = <&seninf_csi0_wide_in>;
+};
+
+&seninf {
+	phys = <&csi1_rx>, <&csi2_rx>, <&csi0_rx>;
+	phy-names = "csi1", "csi2", "csi0";
+
+	ports {
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			seninf_csi0_macro_in: endpoint@0 {
+				reg = <0>;
+				data-lanes = <1 2>;
+				remote-endpoint = <&s5k5e9_out>;
+			};
+
+			seninf_csi0_wide_in: endpoint@1 {
+				reg = <1>;
+				data-lanes = <1 2 3 4>;
+				remote-endpoint = <&s5k4h7_out>;
+			};
+		};
+
+		port@7 {
+			reg = <7>;
+
+			seninf_camsv4_out: endpoint {
+				remote-endpoint = <&camsv4_in>;
+			};
+		};
+	};
+};
+
+&camsv4 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			camsv4_in: endpoint {
+				remote-endpoint = <&seninf_camsv4_out>;
+			};
+		};
+	};
+};
