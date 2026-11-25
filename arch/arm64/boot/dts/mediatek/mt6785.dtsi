@@ -1573,6 +1573,7 @@
 			reg = <0 0x11270000 0 0x2300>;
 			interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_LOW>;
 			phys = <&ufsphy>;
+			lanes-per-direction = <1>;
 
 			clocks = <&infracfg CLK_INFRA_UFS>,
 				 <&infracfg CLK_INFRA_UFS_AXI>,
