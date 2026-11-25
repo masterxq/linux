@@ -19,6 +19,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-pmic-c2.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-pmic-tc.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-mt6382.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-backlight.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-cpufreq.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-drm.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-gpu.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6785-motorola-lisbon-drm-gpu.dtb

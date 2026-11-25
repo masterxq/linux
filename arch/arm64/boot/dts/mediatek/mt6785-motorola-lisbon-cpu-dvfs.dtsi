@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): CPU DVFS for mediatek-cpufreq.
+ *
+ * Cluster LL (cpu0-5) and the CCI are supplied by VPROC2/VSRAM_PROC2, cluster L (cpu6-7) by
+ * VPROC1/VSRAM_PROC1. VSRAM follows Vproc through PMIC hardware tracking, so there is no
+ * sram-supply here. The OPP tables in mt6785.dtsi are the MT6785T tables (CPU_LEVEL_1 and the
+ * hybrid DVFS CCI table).
+ *
+ * &cci: until the CCI devfreq driver (passive on cpufreq through the required-opps of the cluster
+ * tables) is bound, mediatek-cpufreq never sets Vproc below the boot voltage and the CCI keeps the
+ * clock set by the bootloader (612 MHz). VPROC2 has two consumers (cpu0-5 and the CCI); the
+ * regulator core applies the higher of both requests.
+ *
+ * The CPUs are cooling devices of the LVTS zones (mt6785-motorola-lisbon-lvts.dtsi).
+ */
+
+&cci {
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	status = "okay";
+};
+
+&cpu0 { proc-supply = <&mt6359_vproc2_buck_reg>; #cooling-cells = <2>; };
+&cpu1 { proc-supply = <&mt6359_vproc2_buck_reg>; #cooling-cells = <2>; };
+&cpu2 { proc-supply = <&mt6359_vproc2_buck_reg>; #cooling-cells = <2>; };
+&cpu3 { proc-supply = <&mt6359_vproc2_buck_reg>; #cooling-cells = <2>; };
+&cpu4 { proc-supply = <&mt6359_vproc2_buck_reg>; #cooling-cells = <2>; };
+&cpu5 { proc-supply = <&mt6359_vproc2_buck_reg>; #cooling-cells = <2>; };
+&cpu6 { proc-supply = <&mt6359_vproc1_buck_reg>; #cooling-cells = <2>; };
+&cpu7 { proc-supply = <&mt6359_vproc1_buck_reg>; #cooling-cells = <2>; };

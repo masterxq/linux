@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with CPU DVFS for mediatek-cpufreq, without the CCI devfreq driver.
+ *
+ * Cluster LL (cpu0-5) and the CCI are supplied by VPROC2, cluster L (cpu6-7) by VPROC1. VSRAM
+ * follows Vproc through PMIC hardware tracking, so there is no sram-supply. Without the CCI devfreq
+ * driver mediatek-cpufreq never sets Vproc below the boot voltage.
+ */
+
+#include "mt6785-motorola-lisbon.dts"
+
+&cci {
+	/* The CCI shares VPROC2 with cluster LL; required by the binding. */
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	status = "okay";
+};
+
+&cpu0 { proc-supply = <&mt6359_vproc2_buck_reg>; };
+&cpu1 { proc-supply = <&mt6359_vproc2_buck_reg>; };
+&cpu2 { proc-supply = <&mt6359_vproc2_buck_reg>; };
+&cpu3 { proc-supply = <&mt6359_vproc2_buck_reg>; };
+&cpu4 { proc-supply = <&mt6359_vproc2_buck_reg>; };
+&cpu5 { proc-supply = <&mt6359_vproc2_buck_reg>; };
+&cpu6 { proc-supply = <&mt6359_vproc1_buck_reg>; };
+&cpu7 { proc-supply = <&mt6359_vproc1_buck_reg>; };
