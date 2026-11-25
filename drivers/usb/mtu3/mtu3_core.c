@@ -793,6 +793,13 @@ static irqreturn_t mtu3_irq(int irq, void *data)
 	unsigned long flags;
 	u32 level1;
 
+	/*
+	 * The handler is threaded, so the IRQ core does not disable bottom
+	 * halves for it. Gadget completion callbacks may raise softirqs, e.g.
+	 * netif_rx() in u_ether, and must not run them while the handler is
+	 * active; they are processed by local_bh_enable() below instead.
+	 */
+	local_bh_disable();
 	spin_lock_irqsave(&mtu->lock, flags);
 
 	/* U3D_LV1ISR is RU */
@@ -815,6 +822,7 @@ static irqreturn_t mtu3_irq(int irq, void *data)
 		mtu3_qmu_isr(mtu);
 
 	spin_unlock_irqrestore(&mtu->lock, flags);
+	local_bh_enable();
 
 	return IRQ_HANDLED;
 }
@@ -1033,19 +1041,44 @@ bool ssusb_gadget_ip_sleep_check(struct ssusb_mtk *ssusb)
 int ssusb_gadget_suspend(struct ssusb_mtk *ssusb, pm_message_t msg)
 {
 	struct mtu3 *mtu = ssusb->u3d;
+	unsigned long flags;
 
 	if (!mtu->gadget_driver)
 		return 0;
 
-	/* Prevent runtime suspend when active connection exists */
-	if (mtu->connected && PMSG_IS_AUTO(msg))
-		return -EBUSY;
+	if (PMSG_IS_AUTO(msg)) {
+		if (mtu->connected)
+			return -EBUSY;
 
-	/* Perform soft disconnect for system suspend */
-	if (mtu->softconnect && !PMSG_IS_AUTO(msg))
-		mtu3_dev_on_off(mtu, 0);
+		mtu3_dev_suspend(mtu);
+		synchronize_irq(mtu->irq);
+		return 0;
+	}
 
-	mtu3_dev_suspend(mtu);
+	/*
+	 * System suspend: leave the bus even while a host is attached, the
+	 * same way as a soft disconnect followed by a UDC stop does (dwc3
+	 * also disconnects in system suspend). The gadget driver stays bound
+	 * and the soft connect request is kept; resume starts the controller
+	 * again and the host enumerates the gadget anew. As in mtu3_irq(),
+	 * bottom halves stay off while the gadget driver's disconnect and
+	 * request completions run with the lock held.
+	 */
+	local_bh_disable();
+	spin_lock_irqsave(&mtu->lock, flags);
+	if (mtu->is_active) {
+		mtu3_intr_disable(mtu);
+		mtu3_gadget_suspend_bus(mtu);
+		if (mtu->connected) {
+			mtu->connected = 0;
+			pm_runtime_put(mtu->dev);
+		}
+		mtu3_stop(mtu);
+		mtu->suspend_stopped = 1;
+	}
+	spin_unlock_irqrestore(&mtu->lock, flags);
+	local_bh_enable();
+
 	synchronize_irq(mtu->irq);
 
 	return 0;
@@ -1054,15 +1087,23 @@ int ssusb_gadget_suspend(struct ssusb_mtk *ssusb, pm_message_t msg)
 int ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg)
 {
 	struct mtu3 *mtu = ssusb->u3d;
+	unsigned long flags;
 
 	if (!mtu->gadget_driver)
 		return 0;
 
-	mtu3_dev_resume(mtu);
+	if (PMSG_IS_AUTO(msg)) {
+		mtu3_dev_resume(mtu);
+		return 0;
+	}
 
-	/* Restore soft connect for system resume */
-	if (mtu->softconnect && !PMSG_IS_AUTO(msg))
-		mtu3_dev_on_off(mtu, 1);
+	/* start again what system suspend stopped, with pullup if requested */
+	spin_lock_irqsave(&mtu->lock, flags);
+	if (mtu->suspend_stopped) {
+		mtu->suspend_stopped = 0;
+		mtu3_start(mtu);
+	}
+	spin_unlock_irqrestore(&mtu->lock, flags);
 
 	return 0;
 }
