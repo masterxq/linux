@@ -358,7 +358,10 @@ struct mtk_mutex_data {
 	const u16 mutex_mod1_reg;
 	const u16 mutex_sof_reg;
 	const bool no_clk;
+	const bool clear_boot_mod;
 };
+
+static DEFINE_SPINLOCK(mtk_mutex_claim_lock);
 
 struct mtk_mutex_ctx {
 	struct device			*dev;
@@ -368,7 +371,19 @@ struct mtk_mutex_ctx {
 	const struct mtk_mutex_data	*data;
 	phys_addr_t			addr;
 	struct cmdq_client_reg		cmdq_reg;
+	unsigned long			boot_mod_cleared;
 };
+
+/*
+ * A bootloader that keeps scanning out leaves its mutex running with the modules of its own path.
+ * mtk_mutex_add_comp() only sets bits, so a module that is no longer fed after the new routing (on
+ * MT6785 e.g. RSZ0 between OVL0_2L and OVL0) stays in the mutex and the mutex waits for it forever:
+ * no frame done, no vblank. On SoCs with clear_boot_mod the module bits are cleared once, at the
+ * first add_comp of each mutex (mediatek-drm calls it after its takeover sync, i.e. in the vertical
+ * blanking), except for the bits in boot_mod_keep (DSI0 and PWM0 of MT6785, which the bootloader
+ * and the vendor kernel keep in the display mutex; mainline adds DSI0 as SOF source only).
+ */
+static const unsigned int boot_mod_keep = BIT(18) | BIT(19);
 
 static const u8 mt2701_mutex_mod[DDP_COMPONENT_ID_MAX] = {
 	[DDP_COMPONENT_BLS] = MT2701_MUTEX_MOD_DISP_BLS,
@@ -769,6 +784,7 @@ static const struct mtk_mutex_data mt6785_mutex_driver_data = {
 	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
 	.no_clk = true,
+	.clear_boot_mod = true,
 };
 
 static const struct mtk_mutex_data mt6795_mutex_driver_data = {
@@ -870,31 +886,84 @@ static const struct mtk_mutex_data mt8365_mutex_driver_data = {
 	.no_clk = true,
 };
 
-struct mtk_mutex *mtk_mutex_get(struct device *dev)
+static struct mtk_mutex *mtk_mutex_claim(struct device *dev, unsigned int first,
+					 unsigned int end)
 {
 	struct mtk_mutex_ctx *mtx = dev_get_drvdata(dev);
-	int i;
+	struct mtk_mutex *mutex = ERR_PTR(-EBUSY);
+	unsigned long flags;
+	unsigned int i;
 
-	for (i = 0; i < MTK_MUTEX_MAX_HANDLES; i++)
+	if (!mtx)
+		return ERR_PTR(-EPROBE_DEFER);
+
+	spin_lock_irqsave(&mtk_mutex_claim_lock, flags);
+	for (i = first; i < end; i++) {
 		if (!mtx->mutex[i].claimed) {
 			mtx->mutex[i].claimed = true;
-			return &mtx->mutex[i];
+			mutex = &mtx->mutex[i];
+			break;
 		}
+	}
+	spin_unlock_irqrestore(&mtk_mutex_claim_lock, flags);
+	return mutex;
+}
 
-	return ERR_PTR(-EBUSY);
+struct mtk_mutex *mtk_mutex_get(struct device *dev)
+{
+	return mtk_mutex_claim(dev, 0, MTK_MUTEX_MAX_HANDLES);
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_get);
 
-void mtk_mutex_put(struct mtk_mutex *mutex)
+struct mtk_mutex *mtk_mutex_mdp_get(struct device *dev)
+{
+	struct mtk_mutex_ctx *mtx = dev_get_drvdata(dev);
+
+	if (!mtx)
+		return ERR_PTR(-EPROBE_DEFER);
+	if (mtx->data != &mt6785_mutex_driver_data)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	/* Reserve the memory-path handle; never borrow display handles. */
+	return mtk_mutex_claim(dev, 6, 7);
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_mdp_get);
+
+int mtk_mutex_mdp_config(struct mtk_mutex *mutex, bool enable)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
 
-	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+	if (mtx->data != &mt6785_mutex_driver_data || mutex->id != 6)
+		return -EOPNOTSUPP;
+	writel(enable ? BIT(2) | BIT(7) : 0,
+	       mtx->regs + DISP_REG_MUTEX_MOD(mtx, 0, mutex->id));
+	writel(0, mtx->regs + DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_mdp_config);
 
+void mtk_mutex_put(struct mtk_mutex *mutex)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&mtk_mutex_claim_lock, flags);
 	mutex->claimed = false;
+	spin_unlock_irqrestore(&mtk_mutex_claim_lock, flags);
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_put);
+
+static void mtk_mutex_clear_boot_mod(struct mtk_mutex_ctx *mtx, unsigned int id)
+{
+	u32 offset = DISP_REG_MUTEX_MOD(mtx, 0, id);
+	u32 old = readl_relaxed(mtx->regs + offset);
+
+	writel_relaxed(old & boot_mod_keep, mtx->regs + offset);
+	if (mtx->data->mutex_mod1_reg)
+		writel_relaxed(0, mtx->regs + DISP_REG_MUTEX_MOD(mtx, 32, id));
+	pr_info("mtk-mutex: mutex %u: MOD0 0x%08x left by the bootloader -> 0x%08x\n",
+		id, old, old & boot_mod_keep);
+}
 
 int mtk_mutex_prepare(struct mtk_mutex *mutex)
 {
@@ -922,6 +991,10 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 	unsigned int offset;
 
 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+
+	if (mtx->data->clear_boot_mod &&
+	    !test_and_set_bit(mutex->id, &mtx->boot_mod_cleared))
+		mtk_mutex_clear_boot_mod(mtx, mutex->id);
 
 	switch (id) {
 	case DDP_COMPONENT_DSI0:
@@ -1024,9 +1097,8 @@ int mtk_mutex_enable_by_cmdq(struct mtk_mutex *mutex, void *pkt)
 		return -ENODEV;
 	}
 
-	mtx->cmdq_reg.pkt_write(cmdq_pkt, mtx->cmdq_reg.subsys, en_addr, en_addr, 1);
-
-	return 0;
+	return mtx->cmdq_reg.pkt_write(cmdq_pkt, mtx->cmdq_reg.subsys, en_addr,
+				       en_addr, 1);
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_enable_by_cmdq);
 
@@ -1138,6 +1210,7 @@ static int mtk_mutex_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(mtx->clk), "Failed to get clock\n");
 	}
 
+	mtx->dev = dev;
 	mtx->regs = devm_platform_get_and_ioremap_resource(pdev, 0, &regs);
 	if (IS_ERR(mtx->regs)) {
 		dev_err(dev, "Failed to map mutex registers\n");

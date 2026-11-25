@@ -67,6 +67,8 @@ enum mtk_mutex_sof_index {
 	MUTEX_SOF_IDX_MAX		/* ALWAYS keep at the end */
 };
 
+struct mtk_mutex *mtk_mutex_mdp_get(struct device *dev);
+int mtk_mutex_mdp_config(struct mtk_mutex *mutex, bool enable);
 struct mtk_mutex *mtk_mutex_get(struct device *dev);
 int mtk_mutex_prepare(struct mtk_mutex *mutex);
 void mtk_mutex_add_comp(struct mtk_mutex *mutex,
