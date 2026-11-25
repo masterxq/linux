@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/power_supply.h>
+#include <linux/rwsem.h>
 #include <linux/slab.h>
 #include <linux/leds.h>
 
@@ -137,9 +138,6 @@ static int power_supply_create_status_triggers(struct power_supply *psy)
 {
 	int err = 0;
 
-	if (!power_supply_has_property(psy, POWER_SUPPLY_PROP_STATUS))
-		return 0;
-
 	power_supply_register_led_trigger(psy, "%s-charging-or-full",
 					  &psy->charging_or_full_trig, &err);
 	power_supply_register_led_trigger(psy, "%s-charging",
@@ -170,9 +168,6 @@ static int power_supply_create_online_trigger(struct power_supply *psy)
 {
 	int err = 0;
 
-	if (!power_supply_has_property(psy, POWER_SUPPLY_PROP_ONLINE))
-		return 0;
-
 	power_supply_register_led_trigger(psy, "%s-online", &psy->online_trig,
 					  &err);
 
@@ -187,15 +182,32 @@ void power_supply_update_leds(struct power_supply *psy)
 
 int power_supply_create_triggers(struct power_supply *psy)
 {
+	bool has_online, has_status;
 	int err;
 
-	err = power_supply_create_online_trigger(psy);
-	if (err)
-		goto err_remove;
+	/*
+	 * The properties are checked under extensions_sem, the triggers are
+	 * registered without it: led_trigger_register() takes
+	 * triggers_list_lock, which the LED core holds while it activates a
+	 * trigger, and activating a power supply trigger reads properties
+	 * under extensions_sem.
+	 */
+	scoped_guard(rwsem_read, &psy->extensions_sem) {
+		has_online = power_supply_has_property(psy, POWER_SUPPLY_PROP_ONLINE);
+		has_status = power_supply_has_property(psy, POWER_SUPPLY_PROP_STATUS);
+	}
 
-	err = power_supply_create_status_triggers(psy);
-	if (err)
-		goto err_remove;
+	if (has_online) {
+		err = power_supply_create_online_trigger(psy);
+		if (err)
+			goto err_remove;
+	}
+
+	if (has_status) {
+		err = power_supply_create_status_triggers(psy);
+		if (err)
+			goto err_remove;
+	}
 
 	return 0;
 
