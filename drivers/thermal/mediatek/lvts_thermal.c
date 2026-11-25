@@ -12,6 +12,7 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
+#include <linux/mutex.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -111,6 +112,36 @@
 static int golden_temp = LVTS_GOLDEN_TEMP_DEFAULT;
 static int golden_temp_offset;
 
+/*
+ * Safety gate for platforms whose LVTS support is not yet validated
+ * (lvts_data.safety_gate, MT6785). Module parameter "mode":
+ *   read  (default) map the block and the efuse, log calibration and controller registers,
+ *         write nothing to the thermal controller, register no thermal zone
+ *   on    initialise the controllers, check every sensor once (calibration and first reading
+ *         plausible), register thermal zones for the plausible ones only, polling only
+ *         (no interrupt requested, MONINT stays 0)
+ *   full  as "on", but with trip interrupts like on every other SoC
+ * In every mode the hardware protection reset (MONINT bit 31, PROTTC) stays off.
+ */
+enum lvts_gate_mode {
+	LVTS_GATE_READ,
+	LVTS_GATE_ON,
+	LVTS_GATE_FULL,
+};
+
+static char *lvts_mode = "read";
+module_param_named(mode, lvts_mode, charp, 0444);
+MODULE_PARM_DESC(mode, "safety gated SoCs (MT6785): read (default), on (polling only) or full");
+
+#define LVTS_GATE_CAL_MIN	10000		/* count_r, vendor default 19000 */
+#define LVTS_GATE_CAL_MAX	30000
+#define LVTS_GATE_BOOT_MIN	10000		/* first reading, mC */
+#define LVTS_GATE_BOOT_MAX	85000
+#define LVTS_GATE_RANGE_MIN	(-25000)	/* any reading outside is ignored */
+#define LVTS_GATE_RANGE_MAX	150000
+#define LVTS_GATE_SPIKE		30000		/* jump that needs a second reading */
+#define LVTS_GATE_SPIKE_CONFIRM	2
+
 enum lvts_msr_mode {
 	LVTS_MSR_IMMEDIATE_MODE,
 	LVTS_MSR_FILTERED_MODE,
@@ -127,6 +158,10 @@ struct lvts_ctrl_data {
 	u8 valid_sensor_mask;
 	int offset;
 	enum lvts_msr_mode mode;
+	/* Optional SoC specific sampling setup, 0 = driver defaults */
+	u32 monctl1;
+	u32 monctl2;
+	u32 msrctl0;
 };
 
 #define VALID_SENSOR_MAP(s0, s1, s2, s3) \
@@ -160,6 +195,8 @@ struct lvts_data {
 	int gt_calib_bit_offset;
 	unsigned int def_calibration;
 	u16 msr_offset;
+	bool write_calscale;
+	bool safety_gate;
 };
 
 struct lvts_sensor {
@@ -170,6 +207,10 @@ struct lvts_sensor {
 	int dt_id;
 	int low_thresh;
 	int high_thresh;
+	bool gate;
+	bool have_last;
+	int last_temp;
+	int spike_cnt;
 };
 
 struct lvts_ctrl {
@@ -181,6 +222,10 @@ struct lvts_ctrl {
 	void __iomem *base;
 	int low_thresh;
 	int high_thresh;
+	struct mutex trip_lock;		/* shared thresholds and interrupt registers */
+	u32 monctl1;
+	u32 monctl2;
+	u32 msrctl0;
 };
 
 struct lvts_domain {
@@ -191,6 +236,8 @@ struct lvts_domain {
 	void __iomem *base;
 	size_t calib_len;
 	u8 *calib;
+	enum lvts_gate_mode gate_mode;
+	bool read_only;
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *dom_dentry;
 #endif
@@ -378,6 +425,34 @@ static int lvts_get_temp(struct thermal_zone_device *tz, int *temp)
 
 	*temp = lvts_raw_to_temp(value, lvts_data);
 
+	if (!lvts_sensor->gate)
+		return 0;
+
+	/*
+	 * Safety gate: a reading outside of what the die can reach is a read error, not a
+	 * temperature (raw 0 would be about 230 C and end in a critical shutdown). A jump of
+	 * more than LVTS_GATE_SPIKE against the last accepted value has to be confirmed by
+	 * further readings before it is reported.
+	 */
+	if (*temp < LVTS_GATE_RANGE_MIN || *temp > LVTS_GATE_RANGE_MAX) {
+		pr_warn_ratelimited("%s: lvts gate: reading %d mC (raw %#x) ignored\n",
+				    thermal_zone_device_type(tz), *temp, value);
+		return -EAGAIN;
+	}
+
+	if (lvts_sensor->have_last && abs(*temp - lvts_sensor->last_temp) > LVTS_GATE_SPIKE &&
+	    lvts_sensor->spike_cnt < LVTS_GATE_SPIKE_CONFIRM) {
+		lvts_sensor->spike_cnt++;
+		pr_warn_ratelimited("%s: lvts gate: jump %d -> %d mC held back\n",
+				    thermal_zone_device_type(tz), lvts_sensor->last_temp, *temp);
+		*temp = lvts_sensor->last_temp;
+		return 0;
+	}
+
+	lvts_sensor->spike_cnt = 0;
+	lvts_sensor->last_temp = *temp;
+	lvts_sensor->have_last = true;
+
 	return 0;
 }
 
@@ -409,12 +484,11 @@ static void lvts_update_irq_mask(struct lvts_ctrl *lvts_ctrl)
 			 * don't actually want to generate interrupts when
 			 * crossing it.
 			 */
-			if (lvts_ctrl->low_thresh == -INT_MAX) {
-				value &= ~low_offset_inten_masks[i];
+			value &= ~(low_offset_inten_masks[i] | high_offset_inten_masks[i]);
+			if (lvts_ctrl->high_thresh != INT_MAX)
 				value |= high_offset_inten_masks[i];
-			} else {
-				value |= low_offset_inten_masks[i] | high_offset_inten_masks[i];
-			}
+			if (lvts_ctrl->low_thresh != -INT_MAX)
+				value |= low_offset_inten_masks[i];
 		} else {
 			value &= ~(low_offset_inten_masks[i] | high_offset_inten_masks[i]);
 		}
@@ -427,7 +501,8 @@ static bool lvts_should_update_thresh(struct lvts_ctrl *lvts_ctrl, int high)
 {
 	int i;
 
-	if (high > lvts_ctrl->high_thresh)
+	if (high != INT_MAX &&
+	    (lvts_ctrl->high_thresh == INT_MAX || high > lvts_ctrl->high_thresh))
 		return true;
 
 	lvts_for_each_valid_sensor(i, lvts_ctrl)
@@ -447,9 +522,9 @@ static int lvts_set_trips(struct thermal_zone_device *tz, int low, int high)
 	void __iomem *base = lvts_sensor->base;
 	u32 raw_low = lvts_temp_to_raw(low != -INT_MAX ? low : LVTS_MINIMUM_THRESHOLD,
 				       lvts_data);
-	u32 raw_high = lvts_temp_to_raw(high, lvts_data);
 	bool should_update_thresh;
 
+	mutex_lock(&lvts_ctrl->trip_lock);
 	lvts_sensor->low_thresh = low;
 	lvts_sensor->high_thresh = high;
 
@@ -458,10 +533,8 @@ static int lvts_set_trips(struct thermal_zone_device *tz, int low, int high)
 		lvts_ctrl->high_thresh = high;
 		lvts_ctrl->low_thresh = low;
 	}
-	lvts_update_irq_mask(lvts_ctrl);
-
 	if (!should_update_thresh)
-		return 0;
+		goto update_mask;
 
 	/*
 	 * Low offset temperature threshold
@@ -485,17 +558,21 @@ static int lvts_set_trips(struct thermal_zone_device *tz, int low, int high)
 	 *
 	 * 14-0 : Raw temperature for threshold
 	 */
-	pr_debug("%s: Setting high limit temperature interrupt: %d\n",
-		 thermal_zone_device_type(tz), high);
-	writel(raw_high, LVTS_OFFSETH(base));
+	if (high != INT_MAX) {
+		pr_debug("%s: Setting high limit temperature interrupt: %d\n",
+			 thermal_zone_device_type(tz), high);
+		writel(lvts_temp_to_raw(high, lvts_data), LVTS_OFFSETH(base));
+	}
 
+update_mask:
+	lvts_update_irq_mask(lvts_ctrl);
+	mutex_unlock(&lvts_ctrl->trip_lock);
 	return 0;
 }
 
 static irqreturn_t lvts_ctrl_irq_handler(struct lvts_ctrl *lvts_ctrl)
 {
-	irqreturn_t iret = IRQ_NONE;
-	u32 value;
+	u32 value, enabled;
 	static const u32 masks[] = {
 		LVTS_INT_SENSOR0,
 		LVTS_INT_SENSOR1,
@@ -566,7 +643,16 @@ static irqreturn_t lvts_ctrl_irq_handler(struct lvts_ctrl *lvts_ctrl)
 	 * sensor 0 interrupt: 0000 0000 0000 1001 0000 0000 0001 1111
 	 *                  => 0x0009001F
 	 */
+	mutex_lock(&lvts_ctrl->trip_lock);
+	enabled = readl(LVTS_MONINT(lvts_ctrl->base));
 	value = readl(LVTS_MONINTSTS(lvts_ctrl->base));
+	/* Acknowledge before the thermal core can program a new window. */
+	if (value)
+		writel(value, LVTS_MONINTSTS(lvts_ctrl->base));
+	mutex_unlock(&lvts_ctrl->trip_lock);
+	value &= enabled;
+	if (!value)
+		return IRQ_NONE;
 
 	/*
 	 * Let's figure out which sensors raised the interrupt
@@ -576,21 +662,13 @@ static irqreturn_t lvts_ctrl_irq_handler(struct lvts_ctrl *lvts_ctrl)
 	 * sensor0.
 	 */
 	for (i = 0; i < ARRAY_SIZE(masks); i++) {
+		struct thermal_zone_device *tz = READ_ONCE(lvts_ctrl->sensors[i].tz);
 
-		if (!(value & masks[i]))
-			continue;
-
-		thermal_zone_device_update(lvts_ctrl->sensors[i].tz,
-					   THERMAL_TRIP_VIOLATED);
-		iret = IRQ_HANDLED;
+		if (tz && (value & masks[i]))
+			thermal_zone_device_update(tz, THERMAL_TRIP_VIOLATED);
 	}
 
-	/*
-	 * Write back to clear the interrupt status (W1C)
-	 */
-	writel(value, LVTS_MONINTSTS(lvts_ctrl->base));
-
-	return iret;
+	return IRQ_HANDLED;
 }
 
 /*
@@ -628,6 +706,11 @@ static irqreturn_t lvts_irq_handler(int irq, void *data)
 static const struct thermal_zone_device_ops lvts_ops = {
 	.get_temp = lvts_get_temp,
 	.set_trips = lvts_set_trips,
+};
+
+/* Safety gate "on": no set_trips, the thermal core polls (polling-delay from DT) */
+static const struct thermal_zone_device_ops lvts_ops_poll = {
+	.get_temp = lvts_get_temp,
 };
 
 static int lvts_sensor_init(struct device *dev, struct lvts_ctrl *lvts_ctrl,
@@ -708,6 +791,7 @@ static int lvts_sensor_init(struct device *dev, struct lvts_ctrl *lvts_ctrl,
 
 		lvts_sensor[i].low_thresh = INT_MIN;
 		lvts_sensor[i].high_thresh = INT_MIN;
+		lvts_sensor[i].gate = lvts_ctrl->lvts_data->safety_gate;
 	}
 
 	lvts_ctrl->valid_sensor_mask = lvts_ctrl_data->valid_sensor_mask;
@@ -852,6 +936,19 @@ static int lvts_calibration_init(struct device *dev, struct lvts_ctrl *lvts_ctrl
 		if (ret)
 			return ret;
 
+		if (lvts_data->safety_gate &&
+		    (calib < LVTS_GATE_CAL_MIN || calib > LVTS_GATE_CAL_MAX)) {
+			dev_warn(dev, "lvts gate: sensor dt %d calibration %u implausible, dropped\n",
+				 sensor->dt_id, calib);
+			lvts_ctrl->valid_sensor_mask &= ~BIT(i);
+			lvts_ctrl->calibration[i] = 0;
+			continue;
+		}
+
+		if (lvts_data->safety_gate)
+			dev_info(dev, "lvts gate: sensor dt %d calibration %u\n",
+				 sensor->dt_id, calib);
+
 		if (gt) {
 			lvts_ctrl->calibration[i] = calib;
 			if (lvts_ctrl->lvts_data->msr_offset)
@@ -928,6 +1025,12 @@ static int lvts_golden_temp_init(struct device *dev, u8 *calib,
 	 */
 	gt = (((u32 *)calib)[0] >> lvts_data->gt_calib_bit_offset) & 0xff;
 
+	/* Safety gate: no fake golden temperature, no sensor at all */
+	if (lvts_data->safety_gate && (!gt || gt >= LVTS_GOLDEN_TEMP_MAX)) {
+		dev_err(dev, "lvts gate: golden temperature %u implausible, no sensor used\n", gt);
+		return -ENODATA;
+	}
+
 	/* A zero value for gt means that device has invalid efuse data */
 	if (gt && gt < LVTS_GOLDEN_TEMP_MAX)
 		golden_temp = gt;
@@ -965,6 +1068,7 @@ static int lvts_ctrl_init(struct device *dev, struct lvts_domain *lvts_td,
 
 		lvts_ctrl[i].base = lvts_td->base + lvts_data->lvts_ctrl[i].offset;
 		lvts_ctrl[i].lvts_data = lvts_data;
+		mutex_init(&lvts_ctrl[i].trip_lock);
 
 		ret = lvts_sensor_init(dev, &lvts_ctrl[i],
 				       &lvts_data->lvts_ctrl[i]);
@@ -983,6 +1087,10 @@ static int lvts_ctrl_init(struct device *dev, struct lvts_domain *lvts_td,
 		 * (filtered or immediate)
 		 */
 		lvts_ctrl[i].mode = lvts_data->lvts_ctrl[i].mode;
+
+		lvts_ctrl[i].monctl1 = lvts_data->lvts_ctrl[i].monctl1;
+		lvts_ctrl[i].monctl2 = lvts_data->lvts_ctrl[i].monctl2;
+		lvts_ctrl[i].msrctl0 = lvts_data->lvts_ctrl[i].msrctl0;
 
 		lvts_ctrl[i].low_thresh = INT_MIN;
 		lvts_ctrl[i].high_thresh = INT_MIN;
@@ -1199,6 +1307,8 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 */
 	value = 0x300;
 	value = LVTS_CALSCALE_CONF;
+	if (lvts_ctrl->lvts_data->write_calscale)
+		writel(value, LVTS_CALSCALE(lvts_ctrl->base));
 
 	/*
 	 * LVTS_MSRCTL0 : Sensor filtering strategy
@@ -1221,6 +1331,8 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 */
 	value = LVTS_HW_FILTER << 9 |  LVTS_HW_FILTER << 6 |
 			LVTS_HW_FILTER << 3 | LVTS_HW_FILTER;
+	if (lvts_ctrl->msrctl0)
+		value = lvts_ctrl->msrctl0;
 	writel(value, LVTS_MSRCTL0(lvts_ctrl->base));
 
 	/*
@@ -1264,6 +1376,8 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 *
 	 */
 	value = LVTS_GROUP_INTERVAL << 20 | LVTS_PERIOD_UNIT;
+	if (lvts_ctrl->monctl1)
+		value = lvts_ctrl->monctl1;
 	writel(value, LVTS_MONCTL1(lvts_ctrl->base));
 
 	/*
@@ -1277,13 +1391,57 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 *
 	 */
 	value = LVTS_FILTER_INTERVAL << 16 | LVTS_SENSOR_INTERVAL;
+	if (lvts_ctrl->monctl2)
+		value = lvts_ctrl->monctl2;
 	writel(value, LVTS_MONCTL2(lvts_ctrl->base));
 
 	return lvts_irq_init(lvts_ctrl);
 }
 
-static int lvts_ctrl_start(struct device *dev, struct lvts_ctrl *lvts_ctrl)
+/*
+ * Safety gate: start the measurement on all calibrated sensors, wait for one valid reading
+ * each and keep only sensors whose first reading is plausible for a device that just booted.
+ */
+static void lvts_gate_check_sensors(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 {
+	const struct lvts_data *lvts_data = lvts_ctrl->lvts_data;
+	u32 value;
+	int i, rc, temp;
+
+	writel(lvts_ctrl->valid_sensor_mask | BIT(9), LVTS_MONCTL0(lvts_ctrl->base));
+
+	lvts_for_each_valid_sensor(i, lvts_ctrl) {
+		struct lvts_sensor *lvts_sensor = &lvts_ctrl->sensors[i];
+
+		rc = readl_poll_timeout(lvts_sensor->msr, value, value & BIT(16), 1000, 100000);
+		if (rc) {
+			dev_warn(dev, "lvts gate: sensor dt %d no valid reading (%#x), dropped\n",
+				 lvts_sensor->dt_id, value);
+			lvts_ctrl->valid_sensor_mask &= ~BIT(i);
+			continue;
+		}
+
+		temp = lvts_raw_to_temp(value, lvts_data);
+		if (temp < LVTS_GATE_BOOT_MIN || temp > LVTS_GATE_BOOT_MAX) {
+			dev_warn(dev, "lvts gate: sensor dt %d first reading %d mC (raw %#x) implausible, dropped\n",
+				 lvts_sensor->dt_id, temp, value);
+			lvts_ctrl->valid_sensor_mask &= ~BIT(i);
+			continue;
+		}
+
+		lvts_sensor->last_temp = temp;
+		lvts_sensor->have_last = true;
+		dev_info(dev, "lvts gate: sensor dt %d first reading %d mC\n",
+			 lvts_sensor->dt_id, temp);
+	}
+
+	writel(lvts_ctrl->valid_sensor_mask | BIT(9), LVTS_MONCTL0(lvts_ctrl->base));
+}
+
+static int lvts_ctrl_start(struct device *dev, struct lvts_ctrl *lvts_ctrl,
+			   enum lvts_gate_mode gate_mode)
+{
+	const struct thermal_zone_device_ops *ops = &lvts_ops;
 	struct lvts_sensor *lvts_sensors = lvts_ctrl->sensors;
 	struct thermal_zone_device *tz;
 	u32 sensor_map = 0;
@@ -1298,12 +1456,20 @@ static int lvts_ctrl_start(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	u32 *sensor_bitmap = lvts_ctrl->mode == LVTS_MSR_IMMEDIATE_MODE ?
 			     sensor_imm_bitmap : sensor_filt_bitmap;
 
+	if (lvts_ctrl->lvts_data->safety_gate) {
+		if (lvts_ctrl->mode != LVTS_MSR_FILTERED_MODE)
+			return -EINVAL;
+		lvts_gate_check_sensors(dev, lvts_ctrl);
+		if (gate_mode == LVTS_GATE_ON)
+			ops = &lvts_ops_poll;
+	}
+
 	lvts_for_each_valid_sensor(i, lvts_ctrl) {
 
 		int dt_id = lvts_sensors[i].dt_id;
 
 		tz = devm_thermal_of_zone_register(dev, dt_id, &lvts_sensors[i],
-						   &lvts_ops);
+						   ops);
 		if (IS_ERR(tz)) {
 			/*
 			 * This thermal zone is not described in the
@@ -1326,7 +1492,7 @@ static int lvts_ctrl_start(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 		 * interrupt is shared for all the controller
 		 * belonging to the thermal domain.
 		 */
-		lvts_sensors[i].tz = tz;
+		WRITE_ONCE(lvts_sensors[i].tz, tz);
 
 		/*
 		 * This sensor was correctly associated with a thermal
@@ -1370,11 +1536,62 @@ static int lvts_ctrl_start(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	return 0;
 }
 
+/*
+ * Safety gate "read": only readl() on the thermal controller. Logs what the boot loader left
+ * in the controllers, the efuse calibration and, if a controller happens to measure, the
+ * converted temperatures. No reset, no ASIF command, no thermal zone.
+ */
+static int lvts_gate_read(struct device *dev, struct lvts_domain *lvts_td,
+			  const struct lvts_data *lvts_data)
+{
+	int i, j, ret;
+
+	for (i = 0; i < lvts_data->num_lvts_ctrl; i++) {
+		void __iomem *base = lvts_td->base + lvts_data->lvts_ctrl[i].offset;
+
+		dev_info(dev, "lvts gate: read ctrl%d id %#x clken %#x monctl0 %#x monint %#x protctl %#x prottc %#x edata %#x %#x %#x msr %#x %#x %#x\n",
+			 i, readl(LVTS_ID(base)), readl(LVTS_CLKEN(base)),
+			 readl(LVTS_MONCTL0(base)), readl(LVTS_MONINT(base)),
+			 readl(LVTS_PROTCTL(base)), readl(LVTS_PROTTC(base)),
+			 readl(LVTS_EDATA00(base)), readl(LVTS_EDATA01(base)),
+			 readl(LVTS_EDATA02(base)), readl(LVTS_MSR0(base)),
+			 readl(LVTS_MSR1(base)), readl(LVTS_MSR2(base)));
+	}
+
+	lvts_td->read_only = true;
+
+	ret = lvts_ctrl_init(dev, lvts_td, lvts_data);
+	if (ret) {
+		dev_warn(dev, "lvts gate: mode=read, calibration rejected (%d)\n", ret);
+		return 0;
+	}
+
+	for (i = 0; i < lvts_td->num_lvts_ctrl; i++) {
+		struct lvts_ctrl *lvts_ctrl = &lvts_td->lvts_ctrl[i];
+
+		lvts_for_each_valid_sensor(j, lvts_ctrl) {
+			u32 value = readl(lvts_ctrl->sensors[j].msr);
+
+			if (value & BIT(16))
+				dev_info(dev, "lvts gate: read sensor dt %d %d mC (boot loader setup)\n",
+					 lvts_ctrl->sensors[j].dt_id,
+					 lvts_raw_to_temp(value, lvts_data));
+		}
+	}
+
+	dev_info(dev, "lvts gate: mode=read, nothing written, no thermal zone\n");
+
+	return lvts_debugfs_init(dev, lvts_td);
+}
+
 static int lvts_domain_init(struct device *dev, struct lvts_domain *lvts_td,
 					const struct lvts_data *lvts_data)
 {
 	struct lvts_ctrl *lvts_ctrl;
-	int i, ret;
+	int i, ret, active = 0, total = 0;
+
+	if (lvts_data->safety_gate && lvts_td->gate_mode == LVTS_GATE_READ)
+		return lvts_gate_read(dev, lvts_td, lvts_data);
 
 	ret = lvts_ctrl_init(dev, lvts_td, lvts_data);
 	if (ret)
@@ -1432,12 +1649,32 @@ static int lvts_domain_init(struct device *dev, struct lvts_domain *lvts_td,
 			return ret;
 		}
 
-		ret = lvts_ctrl_start(dev, lvts_ctrl);
+		if (lvts_data->safety_gate) {
+			/* hardware protection must stay off: no stage 3 interrupt */
+			if (readl(LVTS_MONINT(lvts_ctrl->base))) {
+				dev_warn(dev, "lvts gate: ctrl%d MONINT %#x, cleared\n", i,
+					 readl(LVTS_MONINT(lvts_ctrl->base)));
+				writel(0, LVTS_MONINT(lvts_ctrl->base));
+			}
+			dev_info(dev, "lvts gate: ctrl%d id %#x protctl %#x prottc %#x\n", i,
+				 readl(LVTS_ID(lvts_ctrl->base)),
+				 readl(LVTS_PROTCTL(lvts_ctrl->base)),
+				 readl(LVTS_PROTTC(lvts_ctrl->base)));
+		}
+
+		ret = lvts_ctrl_start(dev, lvts_ctrl, lvts_td->gate_mode);
 		if (ret) {
 			dev_dbg(dev, "Failed to start controller");
 			return ret;
 		}
+
+		total += hweight8(lvts_data->lvts_ctrl[i].valid_sensor_mask);
+		active += hweight8(lvts_ctrl->valid_sensor_mask);
 	}
+
+	if (lvts_data->safety_gate)
+		dev_info(dev, "lvts gate: mode=%s, %d of %d sensors active, hardware protection off\n",
+			 lvts_td->gate_mode == LVTS_GATE_FULL ? "full" : "on", active, total);
 
 	return lvts_debugfs_init(dev, lvts_td);
 }
@@ -1448,7 +1685,7 @@ static int lvts_probe(struct platform_device *pdev)
 	struct lvts_domain *lvts_td;
 	struct device *dev = &pdev->dev;
 	struct resource *res;
-	int irq, ret;
+	int irq = 0, ret;
 
 	lvts_td = devm_kzalloc(dev, sizeof(*lvts_td), GFP_KERNEL);
 	if (!lvts_td)
@@ -1474,15 +1711,31 @@ static int lvts_probe(struct platform_device *pdev)
 	if (IS_ERR(lvts_td->reset))
 		return dev_err_probe(dev, PTR_ERR(lvts_td->reset), "Failed to get reset control\n");
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
-
 	golden_temp_offset = lvts_data->temp_offset;
+
+	lvts_td->gate_mode = LVTS_GATE_FULL;
+	if (lvts_data->safety_gate) {
+		if (sysfs_streq(lvts_mode, "on"))
+			lvts_td->gate_mode = LVTS_GATE_ON;
+		else if (sysfs_streq(lvts_mode, "full"))
+			lvts_td->gate_mode = LVTS_GATE_FULL;
+		else
+			lvts_td->gate_mode = LVTS_GATE_READ;
+	}
+	if (lvts_td->gate_mode == LVTS_GATE_FULL) {
+		irq = platform_get_irq(pdev, 0);
+		if (irq < 0)
+			return irq;
+	}
 
 	ret = lvts_domain_init(dev, lvts_td, lvts_data);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to initialize the lvts domain\n");
+
+	platform_set_drvdata(pdev, lvts_td);
+
+	if (lvts_td->read_only || lvts_td->gate_mode != LVTS_GATE_FULL)
+		return 0;
 
 	/*
 	 * At this point the LVTS is initialized and enabled. We can
@@ -1493,8 +1746,6 @@ static int lvts_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to request interrupt\n");
 
-	platform_set_drvdata(pdev, lvts_td);
-
 	return 0;
 }
 
@@ -1504,6 +1755,8 @@ static void lvts_remove(struct platform_device *pdev)
 	int i;
 
 	lvts_td = platform_get_drvdata(pdev);
+	if (lvts_td->read_only)
+		return;
 
 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++)
 		lvts_ctrl_set_enable(&lvts_td->lvts_ctrl[i], false);
@@ -1560,6 +1813,8 @@ static int lvts_suspend(struct device *dev)
 	int i;
 
 	lvts_td = dev_get_drvdata(dev);
+	if (lvts_td->read_only)
+		return 0;
 
 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++) {
 		lvts_ctrl_monitor_enable(dev, &lvts_td->lvts_ctrl[i], false);
@@ -1578,6 +1833,8 @@ static int lvts_resume(struct device *dev)
 	int i, ret;
 
 	lvts_td = dev_get_drvdata(dev);
+	if (lvts_td->read_only)
+		return 0;
 
 	ret = clk_prepare_enable(lvts_td->clk);
 	if (ret)
@@ -1605,6 +1862,18 @@ static const u32 default_init_cmds[] = {
 	0xC10300FC, 0xC103009D, 0xC10300F1, 0xC10300E1
 };
 
+/*
+ * MT6785 uses the vendor ASIF command prefix 0x81 (write) / 0x85 (read back), auto
+ * RCK (0x0E = 0x01) and single mode (0x06 = 0xB8) in the vendor order
+ * (lvts_device_identification(), lvts_Device_Enable_Init_all_Devices()).
+ */
+static const u32 mt6785_conn_cmds[] = { 0x8103FFFF, 0x8502FF55 };
+
+static const u32 mt6785_init_cmds[] = {
+	0x81030420, 0x81030500, 0x81030300, 0x810308C3, 0x8103098D,
+	0x81030C7C, 0x81030AA8, 0x81030B04, 0x81030E01, 0x810306B8
+};
+
 static const u32 mt7987_init_cmds[] = {
 	0xC1030300, 0xC1030420, 0xC1030500, 0xC10307A6, 0xC10308C7,
 	0xC103098D, 0xC1030C7C, 0xC1030AA8, 0xC10308CE, 0xC10308C7,
@@ -1617,6 +1886,16 @@ static const u32 mt7988_init_cmds[] = {
 	0xC10306B8
 };
 
+/*
+ * MT6785: four controllers, as in the vendor kernel: 0x000 big cluster (LVTS1_0/1), 0x100
+ * LITTLE cluster (LVTS2_0/1/2), 0x200 GPU (LVTS3_0/1), 0x300 VPU (LVTS4_0). The sampling
+ * setup is the vendor one: MONCTL1 = group interval << 20 | period unit, MONCTL2 = filter
+ * interval << 16 | sensor interval (tc_speed), MSRCTL0 0x492 = 2 out of 4 samples on every
+ * sensor.
+ */
+#define MT6785_LVTS_MONCTL2	0x00010001
+#define MT6785_LVTS_MSRCTL0	0x00000492
+
 static const struct lvts_ctrl_data mt6785_lvts_data_ctrl[] = {
 	{
 		.lvts_sensor = {
@@ -1628,6 +1907,9 @@ static const struct lvts_ctrl_data mt6785_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 1, 0, 0),
 		.offset = 0x0,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.monctl1 = 0x0010000c,
+		.monctl2 = MT6785_LVTS_MONCTL2,
+		.msrctl0 = MT6785_LVTS_MSRCTL0,
 	},
 	{
 		.lvts_sensor = {
@@ -1641,6 +1923,9 @@ static const struct lvts_ctrl_data mt6785_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 1, 1, 0),
 		.offset = 0x100,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.monctl1 = 0x00100007,
+		.monctl2 = MT6785_LVTS_MONCTL2,
+		.msrctl0 = MT6785_LVTS_MSRCTL0,
 	},
 	{
 		.lvts_sensor = {
@@ -1652,6 +1937,9 @@ static const struct lvts_ctrl_data mt6785_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 1, 0, 0),
 		.offset = 0x200,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.monctl1 = 0x0010000c,
+		.monctl2 = MT6785_LVTS_MONCTL2,
+		.msrctl0 = MT6785_LVTS_MSRCTL0,
 	},
 	{
 		.lvts_sensor = {
@@ -1661,6 +1949,9 @@ static const struct lvts_ctrl_data mt6785_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 0, 0, 0),
 		.offset = 0x300,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.monctl1 = 0x0050000c,
+		.monctl2 = MT6785_LVTS_MONCTL2,
+		.msrctl0 = MT6785_LVTS_MSRCTL0,
 	}
 };
 
@@ -2062,13 +2353,26 @@ static const struct lvts_platform_ops lvts_platform_ops_mt8196 = {
 	.lvts_temp_to_raw = lvts_temp_to_raw_mt8196,
 };
 
+/*
+ * Calibration: golden temperature in bits 7:0 of the first word, then one 24 bit count_r per
+ * sensor (vendor lvts_thermal_cal_prepare()); the nvmem cells concatenate to the cal_offsets
+ * above. Conversion as in the vendor kernel: T = -204650 * raw / 16384 + golden * 500 + 204650.
+ */
 static const struct lvts_data mt6785_lvts_data = {
 	.lvts_ctrl	= mt6785_lvts_data_ctrl,
 	.num_lvts_ctrl	= ARRAY_SIZE(mt6785_lvts_data_ctrl),
+	.conn_cmd	= mt6785_conn_cmds,
+	.init_cmd	= mt6785_init_cmds,
+	.num_conn_cmd	= ARRAY_SIZE(mt6785_conn_cmds),
+	.num_init_cmd	= ARRAY_SIZE(mt6785_init_cmds),
+	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT7988,
 	.temp_factor	= LVTS_COEFF_A_MT7988,
 	.temp_offset	= LVTS_COEFF_B_MT7988,
 	.gt_calib_bit_offset = 0,
 	.def_calibration = 19000,
+	.write_calscale	= true,
+	.safety_gate	= true,
+	.ops = &lvts_platform_ops_mt7988,
 };
 
 static const struct lvts_data mt7987_lvts_ap_data = {
