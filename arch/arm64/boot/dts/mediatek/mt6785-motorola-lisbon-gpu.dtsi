@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): Mali-G76 MC4 (GPU_ID 0x7211, r0p0) with panfrost (DVFS 270..735
+ * MHz).
+ *
+ * The MFG power domains are registered by mtk-pm-domains with mediatek,keep-boot-state like all
+ * other domains (status registers only read; MFG is off at boot) and powered on only by their first
+ * user: the MFG clock controller (clk-mt6785-mfg) and panfrost.
+ *
+ * Supplies:
+ *  - VGPU      = MT6359 VGPU11 buck
+ *  - VSRAM_GPU = MT6359 VPU buck
+ *  VSRAM_GPU is switched on before VGPU, the MTCMOS after both, and off in reverse order. As on
+ *  mt8183-kukui and mt8186-corsola, the outer domain mfg_async gets VSRAM and mfg gets VGPU, which
+ *  gives the same order.
+ *  Ranges: VGPU 575..750 mV; 575 mV is the minimum GPU voltage and the value the bootloader leaves,
+ *  so registration writes nothing. VSRAM = VGPU + 100 mV above VGPU 750 mV, else 850 mV. The OPP
+ *  table stays at or below VGPU 750 mV, so VSRAM is pinned to 850 mV (min = max, the bootloader
+ *  value, no write at registration). No regulator coupling: a coupling error makes
+ *  regulator_register() fail, and mt6359-regulator then drops all MT6359 regulators, including the
+ *  UFS and USB supplies. Tracking above 750 mV is left out.
+ *
+ * Power domain tree: MFG3/4/5 (shader cores 1-3) depend on MFG2 (core 0). mt6785.dtsi has the four
+ * core domains as siblings; here core1-3 become children of core0 so that genpd keeps core0 on
+ * while any other core is on (also when panfrost drops its device links in order).
+ *
+ * OPPs: vendor OPPs 42..20 (270..735 MHz, 612.5..750 mV; the SoC table in mt6785.dtsi has the same
+ * pairs and is cut down here), devfreq simple_ondemand. 735 MHz is the highest step with VGPU <=
+ * 750 mV, i.e. with VSRAM_GPU at the fixed 850 mV; 749..806 MHz (OPP 19..15, allowed for the
+ * MT6785T segment) need VSRAM tracking and are left out, VGPU is capped at 750 mV. Every OPP rounds
+ * on MFGPLL to <= the OPP rate (pcw floor, postdiv 8 below 375 MHz and 4 above), so the top_mfg mux
+ * keeps mfgpll (its notifier would undo any reparent).
+ * The GPU is a cooling device of the LVTS zones (mt6785-motorola-lisbon-lvts.dtsi).
+ * MFGPLL is set to 270 MHz (OPP 42, the boot OPP, postdiv 8) before the MFG domain is powered the
+ * first time (assigned-clocks on the MFG clock controller, applied when clk-mt6785-mfg binds,
+ * before its runtime PM powers MFG).
+ * The mfg mux parent is not touched: the MT6785 mfg mux notifier restores the old parent after any
+ * reparent, so the parent left by the bootloader must already be mfgpll (which it is).
+ */
+
+
+/*
+ * SoC table (all 43 vendor steps): keep 270..735 MHz. 749..806 MHz need VSRAM tracking (VGPU > 750 mV),
+ * 821..900 MHz are above the MT6785T segment of this chip (max OPP 15 = 806 MHz).
+ */
+&gpu_opp_table {
+	/delete-node/ opp-749000000;
+	/delete-node/ opp-763000000;
+	/delete-node/ opp-778000000;
+	/delete-node/ opp-792000000;
+	/delete-node/ opp-806000000;
+	/delete-node/ opp-821000000;
+	/delete-node/ opp-835000000;
+	/delete-node/ opp-850000000;
+	/delete-node/ opp-854000000;
+	/delete-node/ opp-858000000;
+	/delete-node/ opp-862000000;
+	/delete-node/ opp-867000000;
+	/delete-node/ opp-871000000;
+	/delete-node/ opp-875000000;
+	/delete-node/ opp-880000000;
+	/delete-node/ opp-884000000;
+	/delete-node/ opp-888000000;
+	/delete-node/ opp-892000000;
+	/delete-node/ opp-897000000;
+	/delete-node/ opp-900000000;
+};
+
+
+/* VGPU: 575 mV (bootloader value) .. 750 mV (highest VGPU with VSRAM fixed at 850 mV, OPP 20) */
+&mt6359_vgpu11_buck_reg {
+	regulator-min-microvolt = <575000>;
+	regulator-max-microvolt = <750000>;
+};
+
+/* VSRAM_GPU: fixed 850 mV (SEG_GPU_DVFS_VSRAM20 = FIXED_VSRAM_VOLT, valid for VGPU <= 750 mV) */
+&mt6359_vpu_buck_reg {
+	regulator-min-microvolt = <850000>;
+	regulator-max-microvolt = <850000>;
+};
+
+/* lisbon-pd.dtsi leaves the mfg tree out; register it (as off, keep-boot-state reads only) */
+&mfg_async {
+	domain-supply = <&mt6359_vpu_buck_reg>;
+	status = "okay";
+};
+
+&mfg {
+	domain-supply = <&mt6359_vgpu11_buck_reg>;
+};
+
+/* mfg_async (6) / mfg (5): shader cores 1-3 below core 0 (7) */
+&{/soc/syscon@10006000/power-controller/power-domain@6/power-domain@5} {
+	/delete-node/ power-domain@8;
+	/delete-node/ power-domain@9;
+	/delete-node/ power-domain@10;
+
+	power-domain@7 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		power-domain@8 {
+			reg = <MT6785_POWER_DOMAIN_MFG_CORE1>;
+			#power-domain-cells = <0>;
+		};
+
+		power-domain@9 {
+			reg = <MT6785_POWER_DOMAIN_MFG_CORE2>;
+			#power-domain-cells = <0>;
+		};
+
+		power-domain@a {
+			reg = <MT6785_POWER_DOMAIN_MFG_CORE3>;
+			#power-domain-cells = <0>;
+		};
+	};
+};
+
+/* lisbon-common.dtsi disables mfgcfg; the driver is a module, so nothing binds at boot */
+&mfgcfg {
+	status = "okay";
+	assigned-clocks = <&apmixedsys CLK_APMIXED_MFGPLL>;
+	assigned-clock-rates = <270000000>;
+};
+
+&gpu {
+	mali-supply = <&mt6359_vgpu11_buck_reg>;
+	status = "okay";
+};

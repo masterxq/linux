@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with the DRM display path (mediatek-drm -> MT6382 -> ILI7807S). The
+ * DRM device is only created when the mt6382 driver is enabled (mediatek_mt6382.drm=1), otherwise
+ * simpledrm stays in use.
+ */
+
+#include "mt6785-motorola-lisbon.dts"
+#include "mt6785-motorola-lisbon-drm.dtsi"

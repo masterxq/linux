@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): DRM path (mediatek-drm -> MT6382 -> ILI7807S, touchscreen as panel
+ * follower), Mali-G76 GPU (panfrost), audio (AFE + MT6359, AW88258 speaker amplifier, ACCDET), CPU
+ * DVFS (mediatek-cpufreq) and the LVTS thermal zones with CPU/GPU cooling, on top of the base
+ * description (consys/WLAN, power domains).
+ * The audio, GPU and LVTS drivers are modules; without lvts_thermal the LVTS zones stay
+ * unregistered.
+ * The SCP sensor hub is described as well; without its driver the SCP stays in reset and only the 4
+ * MiB shared memory reservation remains.
+ * The fingerprint sensor lines and the TEE notification interrupt are described too.
+ * The cameras are described as well: the front camera (OV16A1Q through CSI1, seninf and CAMSV1) is
+ * enabled and loads through its device aliases, the four others stay disabled; the
+ * lisbon-camera-probe module enables them with a changeset. The receive path of CSI0 (CSI0 PHY,
+ * seninf input port 0, CAMSV4) is enabled together with the macro camera (S5K5E9) behind the MIPI
+ * switch.
+ * The ISP power domain gets the clocks of its power sequences (top_mm, IMGSYS larb5 and larb4); the
+ * power controller needs the imgsys clock driver built in for that.
+ * The JPEG encoder and the video decoder and encoder run behind the multimedia IOMMU; the VENC and
+ * VDEC power domains get the clocks of their power sequences (top_mm, larb and GALS gates), so the
+ * vencsys and vdecsys clock drivers have to be built in as well. The MM domain holds the SMI
+ * common, larb0/1 and GALS gates for the display while SMI common runs runtime PM.
+ * The microSD slot (MSDC1) is enabled with its supplies on MT6360 LDO3/LDO5.
+ */
+
+#include "mt6785-motorola-lisbon-drm-gpu.dts"
+#include "mt6785-motorola-lisbon-audio.dtsi"

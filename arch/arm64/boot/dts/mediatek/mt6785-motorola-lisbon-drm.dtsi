@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon): mediatek-drm on top of the display state the bootloader leaves.
+ *
+ * SoC path OVL0 -> OVL0_2L -> RDMA0 -> COLOR0 -> CCORR0 -> AAL0 -> GAMMA0 -> POSTMASK0 -> DITHER0
+ * -> DSI0 (4 lanes, 2.3 Gbit/s) -> MT6382 (RX, DSC, TX) -> ILI7807S panel.
+ *
+ * Takeover on top of the SPM power domains, without IOMMU:
+ *  - &spm with mediatek,keep-boot-state registers MM as always-on (the bootloader leaves it on), so
+ *    the display nodes keep their power-domains = MM from mt6785.dtsi: runtime PM of the components
+ *    only counts, genpd never switches MM off. mmsys is enabled because it provides the MM clock
+ *    gates.
+ *  - no IOMMU: the bootloader scans out from physical memory; the OVL/RDMA nodes lose their iommus,
+ *    DMA buffers come from CMA (CONFIG_DMA_CMA).
+ *  - no GCE/CMDQ: mboxes and gce properties removed, register writes go through the CPU.
+ *  - no resets on OVL/DSI: mediatek-drm would pulse them at bind time and stop the running link.
+ *  - ovl_2l1/rdma1 (second path) stay disabled: the bootloader may not clock them, RDMA probe
+ *    writes registers.
+ *  - DSI0 and MIPI-TX0 "mediatek,inherit-boot-state": the drivers capture the running link at probe
+ *    and keep it on the first enable (no PLL relock, no engine reset), see mtk_dsi.c.
+ *
+ * Nothing binds a DRM card by itself: mediatek-drm needs the DSI device that the mt6382 driver only
+ * registers when mediatek_mt6382.drm=1 (command line or sysfs, see the bridge driver). Until then
+ * only the component drivers probe (ioremap, clocks, IRQ; DSI clears INTSTA, RDMA disables its
+ * interrupts).
+ */
+
+&mmsys {
+	/delete-property/ mboxes;
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&mutex {
+	/delete-property/ mediatek,gce-events;
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&ovl0 {
+	/delete-property/ iommus;
+	/delete-property/ resets;
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&ovl_2l0 {
+	/delete-property/ iommus;
+	/delete-property/ resets;
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&rdma0 {
+	/delete-property/ iommus;
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&color0 {
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&ccorr0 {
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&aal0 {
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&gamma0 {
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&postmask0 {
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&dither0 {
+	/delete-property/ mediatek,gce-client-reg;
+	status = "okay";
+};
+
+&dither0_out {
+	remote-endpoint = <&dsi0_in>;
+};
+
+&dsi0 {
+	compatible = "mediatek,mt6785-dsi", "mediatek,mt8183-dsi";
+	/delete-property/ resets;
+	mediatek,inherit-boot-state;
+	status = "okay";
+};
+
+&dsi0_in {
+	remote-endpoint = <&dither0_out>;
+};
+
+&dsi0_out {
+	remote-endpoint = <&mt6382_in>;
+};
+
+&mipi_tx0 {
+	compatible = "mediatek,mt6785-mipi-tx", "mediatek,mt8183-mipi-tx";
+	mediatek,inherit-boot-state;
+	status = "okay";
+};
+
+&mt6382 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			mt6382_in: endpoint {
+				remote-endpoint = <&dsi0_out>;
+				data-lanes = <1 2 3 4>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+
+			mt6382_out: endpoint {
+				remote-endpoint = <&panel_in>;
+			};
+		};
+	};
+
+	/*
+	 * Panel behind the bridge TX (Tianma ILI7807S, 1080x2460, DSC 1.1 8 bpp). Power: LCD LDO
+	 * enable GPIO88, bias ENP GPIO23 / ENN GPIO202 (bias chip i2c6@0x3e left as set up by the
+	 * bootloader), reset GPIO44 (1-0-1 with 10/10/20 ms). The panel driver requests the GPIOs
+	 * "as is" and drives them only for a full power cycle, never in takeover.
+	 */
+	lisbon_panel: panel@0 {
+		compatible = "tianma,ili7807s-lisbon";
+		reg = <0>;
+		reset-gpios = <&pio 44 GPIO_ACTIVE_LOW>;
+		vddi-enable-gpios = <&pio 88 GPIO_ACTIVE_HIGH>;
+		enp-gpios = <&pio 23 GPIO_ACTIVE_HIGH>;
+		enn-gpios = <&pio 202 GPIO_ACTIVE_HIGH>;
+		backlight = <&lisbon_backlight>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mt6382_out>;
+			};
+		};
+	};
+};
+
+/*
+ * Touch part of the same TDDI chip: a panel power cycle (bias off, display reset GPIO44) also
+ * resets the touch controller and wipes its firmware RAM. The touch driver follows the panel
+ * (drm_panel_follower): stop before unprepare, firmware download after enable.
+ */
+&spi3 {
+	touchscreen@0 {
+		panel = <&lisbon_panel>;
+	};
+};

@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) with the DRM display path (mediatek-drm -> MT6382 -> ILI7807S) and
+ * the Mali-G76 GPU for panfrost. Mesa kmsro renders with panfrost and scans out on mediatek-drm.
+ */
+
+#include "mt6785-motorola-lisbon-drm.dts"
+#include "mt6785-motorola-lisbon-gpu.dtsi"
