@@ -271,10 +271,11 @@ int panfrost_mmu_as_get(struct panfrost_device *pfdev, struct panfrost_mmu *mmu)
 		u32 mask = BIT(as) | BIT(16 + as);
 
 		/*
-		 * AS can be retained by active jobs or a perfcnt context,
-		 * hence the '+ 1' here.
+		 * AS can be retained by active jobs, up to two per job slot
+		 * (current and next), or a perfcnt context, hence the '+ 1'
+		 * here.
 		 */
-		WARN_ON(en >= (NUM_JOB_SLOTS + 1));
+		WARN_ON(en > (2 * NUM_JOB_SLOTS + 1));
 
 		list_move(&mmu->list, &pfdev->as_lru_list);
 
@@ -479,22 +480,29 @@ int panfrost_mmu_map(struct panfrost_gem_mapping *mapping)
 	if (bo->noexec)
 		prot |= IOMMU_NOEXEC;
 
+	/*
+	 * The pages and the sg table belong to the BO (shmem->sgt) and are
+	 * released when the BO is purged or freed; a mapping holds no page
+	 * reference of its own. The call can fail on a signal or on memory
+	 * pressure, which userspace can cause, so don't warn.
+	 */
 	sgt = drm_gem_shmem_get_pages_sgt(shmem);
-	if (WARN_ON(IS_ERR(sgt)))
+	if (IS_ERR(sgt))
 		return PTR_ERR(sgt);
 
+	/*
+	 * mmu_map_sg() unmaps what it mapped on failure. Don't drop a page
+	 * reference here: it is the one shmem->sgt holds, and other mappings
+	 * of this BO may still point at these pages.
+	 */
 	ret = mmu_map_sg(pfdev, mapping->mmu, mapping->mmnode.start << PAGE_SHIFT,
 			 prot, sgt);
 	if (ret)
-		goto err_put_pages;
+		return ret;
 
 	mapping->active = true;
 
 	return 0;
-
-err_put_pages:
-	drm_gem_shmem_put_pages_locked(shmem);
-	return ret;
 }
 
 void panfrost_mmu_unmap(struct panfrost_gem_mapping *mapping)
