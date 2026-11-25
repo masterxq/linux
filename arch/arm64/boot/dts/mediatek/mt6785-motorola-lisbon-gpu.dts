@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Motorola Moto G60s (lisbon) - main DTB plus the Mali-G76 GPU for panfrost (one OPP,
+ * 270 MHz / 612.5 mV). Display variants with mediatek-drm include the same dtsi.
+ */
+
+#include "mt6785-motorola-lisbon.dts"
+#include "mt6785-motorola-lisbon-gpu.dtsi"
